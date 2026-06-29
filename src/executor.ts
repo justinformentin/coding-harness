@@ -1,23 +1,28 @@
-import { chat } from "./llm.js";
+import { chat, chatStreamWithSystem } from "./llm.js";
 import { executorSystemPrompt } from "./prompts.js";
 import { executeTool } from "./tools.js";
-import type { HarnessState, Message, RoleModelConfig } from "./schemas.js";
+import type {
+  HarnessState,
+  Message,
+  RoleModelConfig,
+} from "./schemas.js";
 import { appendCommand } from "./run-store.js";
 
-type ToolCall = {
+type ParsedToolCall = {
   name: string;
   arguments: Record<string, unknown>;
 };
 
 export type ExecutorResult = {
   response: string;
-  toolCalls: ToolCall[];
+  toolCalls: ParsedToolCall[];
   toolResults: { name: string; output: string; success: boolean }[];
 };
 
 export async function execute(
   state: HarnessState,
-  config: RoleModelConfig
+  config: RoleModelConfig,
+  onToken?: (token: string) => void
 ): Promise<ExecutorResult> {
   // Mark next pending item as in_progress
   const nextItem = state.checklist.find((i) => i.status === "pending");
@@ -28,9 +33,23 @@ export async function execute(
   // Build messages from state (already includes any prior conversation)
   const messages: Message[] = [...state.messages];
 
-  const response = await chat(config, systemPrompt, messages);
+  let response: string;
 
-  // Parse tool calls from response
+  if (onToken) {
+    // Streaming path: collect chunks and forward each token via the callback
+    const chunks: string[] = [];
+    for await (const chunk of chatStreamWithSystem(config, systemPrompt, messages)) {
+      chunks.push(chunk);
+      onToken(chunk);
+    }
+    response = chunks.join("");
+  } else {
+    // Non-streaming path (fallback when no onToken provided)
+    const chatResponse = await chat(config, systemPrompt, messages);
+    response = chatResponse.content;
+  }
+
+  // Parse tool calls from response text (freeform ```tool blocks)
   const toolCalls = parseToolCalls(response);
   const toolResults: ExecutorResult["toolResults"] = [];
 
@@ -78,8 +97,9 @@ export async function execute(
   return { response, toolCalls, toolResults };
 }
 
-function parseToolCalls(response: string): ToolCall[] {
-  const calls: ToolCall[] = [];
+
+function parseToolCalls(response: string): ParsedToolCall[] {
+  const calls: ParsedToolCall[] = [];
   const toolBlockRegex = /```tool\s*\n?([\s\S]*?)\n?```/g;
   let match;
 

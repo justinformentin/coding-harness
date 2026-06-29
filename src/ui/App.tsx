@@ -58,8 +58,38 @@ export function App({ config, initialPrompt }: AppProps) {
             "executor",
             `Working on: ${event.itemId} — ${event.itemDescription}`
           );
+          // Add a streaming placeholder entry that tokens will append into
+          setLogs((prev) => [
+            ...prev,
+            { source: "executor" as const, message: "", streaming: true },
+          ]);
+          break;
+        case "executor_token":
+          // Append the incoming token to the last streaming entry
+          setLogs((prev) => {
+            const updated = [...prev];
+            const lastIdx = updated.length - 1;
+            if (lastIdx >= 0 && updated[lastIdx].streaming) {
+              updated[lastIdx] = {
+                ...updated[lastIdx],
+                // Keep only the last 200 chars to avoid blowing up the log line
+                message: (updated[lastIdx].message + event.token).slice(-200),
+              };
+            }
+            return updated;
+          });
           break;
         case "executor_complete":
+          // Close the streaming entry and replace with a summary
+          setLogs((prev) => {
+            const updated = [...prev];
+            const lastIdx = updated.length - 1;
+            if (lastIdx >= 0 && updated[lastIdx].streaming) {
+              // Remove the streaming placeholder; summary comes next
+              updated.splice(lastIdx, 1);
+            }
+            return updated;
+          });
           if (event.toolCalls > 0) {
             addLog("executor", `Made ${event.toolCalls} tool call(s)`);
           }

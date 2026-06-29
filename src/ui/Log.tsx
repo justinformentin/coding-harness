@@ -4,6 +4,9 @@ import { Box, Text } from "ink";
 export type LogEntry = {
   source: "planner" | "executor" | "tool" | "verifier" | "system" | "error";
   message: string;
+  /** When true, this entry is still receiving streaming tokens and the last
+   *  line should be rendered without a trailing newline indicator. */
+  streaming?: boolean;
 };
 
 type LogProps = {
@@ -28,7 +31,10 @@ export function Log({ entries, maxLines = 20 }: LogProps) {
       {visible.map((entry, i) => (
         <Box key={i} gap={1}>
           <Text color={SOURCE_COLORS[entry.source]}>[{entry.source}]</Text>
-          <Text wrap="truncate-end">{entry.message}</Text>
+          <Text wrap="truncate-end">
+            {entry.message}
+            {entry.streaming ? <Text dimColor>▌</Text> : null}
+          </Text>
         </Box>
       ))}
     </Box>
