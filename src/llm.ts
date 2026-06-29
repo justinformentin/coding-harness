@@ -98,15 +98,16 @@ async function* chatStreamOpenAI(
   messages: Message[],
   options: ChatOptions = {}
 ): AsyncGenerator<string> {
-  // For "local" provider, default to Ollama's port if no baseUrl is set.
-  // Users can override with any OpenAI-compatible endpoint (LM Studio: 1234,
-  // vLLM: 8000, llama.cpp server: 8080, etc.).
-  const defaultLocalUrl =
-    config.provider === "local"
-      ? "http://localhost:11434/v1"  // Ollama default; override via baseUrl
-      : "https://api.openai.com/v1";
+  const isLocal = config.provider === "local";
 
-  const baseUrl = config.baseUrl || defaultLocalUrl;
+  // Local provider requires an explicit baseUrl — no defaults.
+  if (isLocal && !config.baseUrl) {
+    throw new Error(
+      "Local provider requires a baseUrl (e.g. http://localhost:11434/v1 for Ollama, http://localhost:1234/v1 for LM Studio)"
+    );
+  }
+
+  const baseUrl = config.baseUrl || "https://api.openai.com/v1";
   const apiKey =
     config.apiKey ||
     (config.provider === "openai" ? process.env.OPENAI_API_KEY : undefined);
@@ -121,34 +122,65 @@ async function* chatStreamOpenAI(
     ...convertMessages(messages),
   ];
 
-  const maxTokens =
-    options.maxTokens ?? config.maxTokens ?? 8192;
-
   const body: Record<string, unknown> = {
     model: config.model,
     messages: llmMessages,
     temperature: options.temperature ?? config.temperature ?? 0.2,
-    max_tokens: maxTokens,
     stream: true,
   };
 
-  if (options.responseFormat) {
-    body.response_format = { type: options.responseFormat };
-  }
+  if (isLocal) {
+    // Local models: only send max_tokens if explicitly configured
+    const localMaxTokens =
+      options.maxTokens ?? config.localOptions?.maxTokens ?? config.maxTokens;
+    if (localMaxTokens !== undefined) {
+      body.max_tokens = localMaxTokens;
+    }
 
-  // Pass tool definitions if provided.
-  // Local models (Ollama) support function calling for capable models;
-  // for others the tools param is passed through as a best-effort.
-  if (options.tools && options.tools.length > 0) {
-    body.tools = options.tools.map((t: ToolDefinition) => ({
-      type: "function",
-      function: {
-        name: t.name,
-        description: t.description,
-        parameters: t.parameters,
-      },
-    }));
-    body.tool_choice = "auto";
+    // response_format only if json mode is explicitly supported
+    if (options.responseFormat && config.localOptions?.supportsJsonMode) {
+      body.response_format = { type: options.responseFormat };
+    }
+
+    // Tool calling only if explicitly supported
+    if (
+      options.tools &&
+      options.tools.length > 0 &&
+      config.localOptions?.supportsToolCalling
+    ) {
+      body.tools = options.tools.map((t: ToolDefinition) => ({
+        type: "function",
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters,
+        },
+      }));
+      // Do NOT send tool_choice — most local servers don't support it
+    }
+  } else {
+    // OpenAI: only send max_tokens if explicitly configured; OpenAI has
+    // sensible defaults and we shouldn't impose an arbitrary cap.
+    const maxTokens = options.maxTokens ?? config.maxTokens;
+    if (maxTokens !== undefined) {
+      body.max_tokens = maxTokens;
+    }
+
+    if (options.responseFormat) {
+      body.response_format = { type: options.responseFormat };
+    }
+
+    if (options.tools && options.tools.length > 0) {
+      body.tools = options.tools.map((t: ToolDefinition) => ({
+        type: "function",
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters,
+        },
+      }));
+      body.tool_choice = "auto";
+    }
   }
 
   const controller = new AbortController();
@@ -156,15 +188,45 @@ async function* chatStreamOpenAI(
     ? combineSignals(options.signal, controller.signal)
     : controller.signal;
 
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-    signal,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (isLocal && (msg.includes("ECONNREFUSED") || msg.includes("fetch failed"))) {
+      throw new Error(
+        `Could not connect to local model server at ${baseUrl}. Is the server running? (${msg})`
+      );
+    }
+    throw err;
+  }
 
   if (!response.ok) {
     const text = await response.text();
+    if (isLocal) {
+      // Try to surface helpful hints for common local model errors
+      const lower = text.toLowerCase();
+      if (lower.includes("max_tokens") || lower.includes("maximum")) {
+        throw new Error(
+          `Local model error [${config.model}] (${response.status}): ${text}\nHint: Try removing or lowering maxTokens / localOptions.maxTokens in your config.`
+        );
+      }
+      if (lower.includes("tool") || lower.includes("function")) {
+        throw new Error(
+          `Local model error [${config.model}] (${response.status}): ${text}\nHint: This model may not support tool calling. Set localOptions.supportsToolCalling: false in your config.`
+        );
+      }
+      if (lower.includes("response_format") || lower.includes("json")) {
+        throw new Error(
+          `Local model error [${config.model}] (${response.status}): ${text}\nHint: This model may not support JSON mode. Set localOptions.supportsJsonMode: false in your config.`
+        );
+      }
+    }
     throw new Error(
       `OpenAI-compatible request failed [${config.provider}/${config.model}] (${response.status}): ${text}`
     );
@@ -233,16 +295,33 @@ async function* chatStreamAnthropic(
     (m) => m.role !== "system"
   );
 
-  const maxTokens = options.maxTokens ?? config.maxTokens ?? 8192;
+  // Resolve thinking config: options take precedence over config-level setting
+  const thinkingOpts = options.thinking ?? config.thinking;
+  const thinkingEnabled = thinkingOpts?.enabled === true;
+  const budgetTokens = thinkingOpts?.budgetTokens ?? 10000;
+
+  // max_tokens must cover both thinking tokens and output tokens
+  const maxTokens =
+    options.maxTokens ?? config.maxTokens ?? (thinkingEnabled ? budgetTokens + 8192 : 16000);
 
   const body: Record<string, unknown> = {
     model: config.model,
     max_tokens: maxTokens,
     system: systemPrompt,
     messages: anthropicMessages,
-    temperature: options.temperature ?? config.temperature ?? 0.2,
     stream: true,
   };
+
+  if (thinkingEnabled) {
+    // Extended thinking requires temperature=1 (Anthropic requirement)
+    body.thinking = {
+      type: "enabled",
+      budget_tokens: budgetTokens,
+    };
+    body.temperature = 1;
+  } else {
+    body.temperature = options.temperature ?? config.temperature ?? 0.2;
+  }
 
   // Anthropic native tool definitions
   if (options.tools && options.tools.length > 0) {
@@ -276,12 +355,18 @@ async function* chatStreamAnthropic(
   //   data: <json>
   //
   // We parse the raw SSE and look for content_block_delta events.
+  // When extended thinking is enabled, the stream will also contain:
+  //   - content_block_start with type "thinking" (we track but don't yield)
+  //   - content_block_delta with type "thinking_delta" (we skip)
+  //   - content_block_delta with type "text_delta" (we yield)
   if (!response.body) throw new Error("Anthropic response body is null");
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let currentEvent = "";
+  // Track whether current content block is a thinking block (to suppress output)
+  let currentBlockIsThinking = false;
 
   try {
     while (true) {
@@ -297,7 +382,25 @@ async function* chatStreamAnthropic(
           currentEvent = line.slice(7).trim();
         } else if (line.startsWith("data: ")) {
           const data = line.slice(6);
-          if (currentEvent === "content_block_delta") {
+
+          if (currentEvent === "content_block_start") {
+            // Identify the block type so we know whether to suppress deltas
+            try {
+              const parsed = JSON.parse(data) as {
+                content_block?: { type?: string };
+              };
+              currentBlockIsThinking =
+                parsed.content_block?.type === "thinking";
+            } catch {
+              currentBlockIsThinking = false;
+            }
+          } else if (currentEvent === "content_block_stop") {
+            currentBlockIsThinking = false;
+          } else if (currentEvent === "content_block_delta") {
+            if (currentBlockIsThinking) {
+              // Thinking delta — track internally but do NOT yield to caller
+              continue;
+            }
             try {
               const parsed = JSON.parse(data) as {
                 delta?: { type?: string; text?: string };
@@ -436,6 +539,59 @@ export async function* chatStreamWithSystem(
       cfg = { ...config, apiKey: process.env.OPENAI_API_KEY };
     }
     yield* chatStreamOpenAI(cfg, systemPrompt, messages, options);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Local model health check
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Check whether a local model server is reachable and lists available models.
+ * Hits GET {baseUrl}/models and returns a simple ok/error result.
+ */
+export async function checkLocalModel(
+  config: RoleModelConfig
+): Promise<{ ok: boolean; models?: string[]; error?: string }> {
+  if (!config.baseUrl) {
+    return {
+      ok: false,
+      error:
+        "Local provider requires a baseUrl (e.g. http://localhost:11434/v1 for Ollama, http://localhost:1234/v1 for LM Studio)",
+    };
+  }
+
+  try {
+    const response = await fetch(`${config.baseUrl}/models`, {
+      method: "GET",
+      headers: { "Content-Type": "application/json" },
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      return {
+        ok: false,
+        error: `Server responded with ${response.status}: ${text}`,
+      };
+    }
+
+    const data = (await response.json()) as {
+      data?: Array<{ id?: string }>;
+    };
+    const models = (data.data ?? [])
+      .map((m) => m.id ?? "")
+      .filter((id) => id !== "");
+
+    return { ok: true, models };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("ECONNREFUSED") || msg.includes("fetch failed")) {
+      return {
+        ok: false,
+        error: `Could not connect to local model server at ${config.baseUrl}. Is the server running? (${msg})`,
+      };
+    }
+    return { ok: false, error: msg };
   }
 }
 

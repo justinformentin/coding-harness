@@ -73,6 +73,19 @@ export const RoleModelConfigSchema = z.object({
   apiKey: z.string().optional(),
   temperature: z.number().optional(),
   maxTokens: z.number().optional(),
+  thinking: z
+    .object({
+      enabled: z.boolean(),
+      budgetTokens: z.number().optional(),
+    })
+    .optional(),
+  localOptions: z
+    .object({
+      supportsToolCalling: z.boolean().optional(),
+      supportsJsonMode: z.boolean().optional(),
+      maxTokens: z.number().optional(),
+    })
+    .optional(),
 });
 
 export type RoleModelConfig = z.infer<typeof RoleModelConfigSchema>;
@@ -115,6 +128,10 @@ export type ChatOptions = {
   tools?: ToolDefinition[];
   maxTokens?: number;
   signal?: AbortSignal;
+  thinking?: {
+    enabled: boolean;
+    budgetTokens?: number;
+  };
 };
 
 export const ArtifactsSchema = z.object({
