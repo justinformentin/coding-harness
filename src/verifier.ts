@@ -247,11 +247,11 @@ async function llmJudge(
     },
   });
 
-  const response = await chat(config, verifierSystemPrompt(), [
+  const { content } = await chat(config, verifierSystemPrompt(), [
     { role: "user", content: prompt },
   ]);
 
-  const jsonStr = response.match(/\{[\s\S]*\}/)?.[0] || response;
+  const jsonStr = content.match(/\{[\s\S]*\}/)?.[0] || content;
   try {
     const parsed = JSON.parse(jsonStr) as unknown;
     const result = VerifierReportSchema.safeParse(parsed);

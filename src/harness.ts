@@ -17,6 +17,7 @@ export type HarnessEvent =
   | { type: "plan_complete"; itemCount: number }
   | { type: "iteration_start"; iteration: number; maxIterations: number }
   | { type: "executor_start"; itemId: string; itemDescription: string }
+  | { type: "executor_token"; token: string }
   | { type: "executor_complete"; response: string; toolCalls: number }
   | { type: "tool_result"; name: string; success: boolean; output: string }
   | { type: "verify_start" }
@@ -68,8 +69,10 @@ export async function runHarness(
         });
       }
 
-      // Execute
-      const result = await execute(state, config.executor);
+      // Execute — stream tokens to the TUI via the executor_token event
+      const result = await execute(state, config.executor, (token) => {
+        onEvent({ type: "executor_token", token });
+      });
       onEvent({
         type: "executor_complete",
         response: result.response,
@@ -162,7 +165,9 @@ async function runHarnessLoop(
       });
     }
 
-    const result = await execute(state, config.executor);
+    const result = await execute(state, config.executor, (token) => {
+      onEvent({ type: "executor_token", token });
+    });
     onEvent({
       type: "executor_complete",
       response: result.response,

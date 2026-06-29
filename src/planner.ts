@@ -12,17 +12,17 @@ export async function plan(
   config: RoleModelConfig
 ): Promise<PlannerChecklistItem[]> {
   const messages: Message[] = [{ role: "user", content: prompt }];
-  const response = await chat(config, plannerSystemPrompt(), messages);
+  const { content } = await chat(config, plannerSystemPrompt(), messages);
 
   // Extract JSON from response (model might wrap it in markdown code blocks)
-  const jsonStr = extractJSON(response);
+  const jsonStr = extractJSON(content);
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(jsonStr);
   } catch {
     throw new Error(
-      `Planner returned invalid JSON: ${response.slice(0, 200)}...`
+      `Planner returned invalid JSON: ${content.slice(0, 200)}...`
     );
   }
 

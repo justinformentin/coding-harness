@@ -72,6 +72,7 @@ export const RoleModelConfigSchema = z.object({
   baseUrl: z.string().optional(),
   apiKey: z.string().optional(),
   temperature: z.number().optional(),
+  maxTokens: z.number().optional(),
 });
 
 export type RoleModelConfig = z.infer<typeof RoleModelConfigSchema>;
@@ -83,6 +84,38 @@ export const ModelConfigSchema = z.object({
 });
 
 export type ModelConfig = z.infer<typeof ModelConfigSchema>;
+
+// Tool calling types
+export const ToolCallSchema = z.object({
+  id: z.string(),
+  tool_name: z.string(),
+  arguments: z.record(z.unknown()),
+});
+
+export type ToolCall = z.infer<typeof ToolCallSchema>;
+
+export const ToolDefinitionSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  parameters: z.record(z.unknown()),
+});
+
+export type ToolDefinition = z.infer<typeof ToolDefinitionSchema>;
+
+export const ChatResponseSchema = z.object({
+  content: z.string(),
+  toolCalls: z.array(ToolCallSchema).optional(),
+});
+
+export type ChatResponse = z.infer<typeof ChatResponseSchema>;
+
+export type ChatOptions = {
+  temperature?: number;
+  responseFormat?: "json_object" | "text";
+  tools?: ToolDefinition[];
+  maxTokens?: number;
+  signal?: AbortSignal;
+};
 
 export const ArtifactsSchema = z.object({
   filesChanged: z.array(z.string()),
