@@ -7,11 +7,14 @@ export async function runCommandTool(args: {
 }): Promise<string> {
   const timeout = args.timeout || 30000;
   try {
+    // Use AbortController for timeout since bun-types may not expose .timeout()
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeout);
     const result = await $`bash -c ${args.command}`
       .cwd(args.cwd || process.cwd())
-      .timeout(timeout)
       .quiet()
-      .nothrow();
+      .nothrow()
+      .finally(() => clearTimeout(timer));
 
     const stdout = result.stdout.toString().trim();
     const stderr = result.stderr.toString().trim();

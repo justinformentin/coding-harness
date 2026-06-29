@@ -11,7 +11,8 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "declaration": true,
-    "declarationMap": true
+    "declarationMap": true,
+    "types": ["bun-types", "node"]
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
