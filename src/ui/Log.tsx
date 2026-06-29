@@ -31,7 +31,7 @@ export function Log({ entries, maxLines = 20 }: LogProps) {
       {visible.map((entry, i) => (
         <Box key={i} gap={1}>
           <Text color={SOURCE_COLORS[entry.source]}>[{entry.source}]</Text>
-          <Text wrap="truncate-end">
+          <Text wrap="wrap">
             {entry.message}
             {entry.streaming ? <Text dimColor>▌</Text> : null}
           </Text>

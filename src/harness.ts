@@ -6,15 +6,28 @@ import { createInitialState, getNextPendingItem } from "./state.js";
 import {
   saveRunInit,
   saveChecklist,
+  savePlanMarkdown,
   saveStateCheckpoint,
   appendIteration,
   appendVerifierReport,
 } from "./run-store.js";
-import type { HarnessState, ModelConfig, VerifierReport } from "./schemas.js";
+import type {
+  HarnessState,
+  ModelConfig,
+  PlannerChecklistItem,
+  VerifierReport,
+} from "./schemas.js";
 
 export type HarnessEvent =
   | { type: "plan_start" }
   | { type: "plan_complete"; itemCount: number }
+  | {
+      type: "plan_review";
+      planPath: string;
+      checklist: PlannerChecklistItem[];
+    }
+  | { type: "plan_approved" }
+  | { type: "plan_rejected" }
   | { type: "iteration_start"; iteration: number; maxIterations: number }
   | { type: "executor_start"; itemId: string; itemDescription: string }
   | { type: "executor_token"; token: string }
@@ -29,12 +42,25 @@ export type HarnessEvent =
 
 export type EventCallback = (event: HarnessEvent) => void;
 
+export type HarnessOptions = {
+  maxIterations?: number;
+  onPlanReview?: (
+    planPath: string,
+    checklist: PlannerChecklistItem[]
+  ) => Promise<"approve" | "reject">;
+};
+
 export async function runHarness(
   prompt: string,
   config: ModelConfig,
   onEvent: EventCallback,
-  maxIterations: number = 10
+  options?: HarnessOptions | number
 ): Promise<HarnessState> {
+  // Support legacy numeric fourth argument for backward compatibility
+  const opts: HarnessOptions =
+    typeof options === "number" ? { maxIterations: options } : options ?? {};
+  const maxIterations = opts.maxIterations ?? 10;
+
   const state = createInitialState(prompt, maxIterations);
 
   try {
@@ -46,6 +72,20 @@ export async function runHarness(
     state.checklist = await plan(prompt, config.planner);
     await saveChecklist(state);
     onEvent({ type: "plan_complete", itemCount: state.checklist.length });
+
+    // Save plan as readable markdown and show it for review
+    const planPath = await savePlanMarkdown(state);
+    onEvent({ type: "plan_review", planPath, checklist: state.checklist });
+
+    // If an approval callback is provided, wait for approval
+    if (opts.onPlanReview) {
+      const decision = await opts.onPlanReview(planPath, state.checklist);
+      if (decision === "reject") {
+        onEvent({ type: "plan_rejected" });
+        return state;
+      }
+      onEvent({ type: "plan_approved" });
+    }
 
     // Add initial user message for executor conversation
     state.messages.push({ role: "user", content: prompt });
