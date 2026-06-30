@@ -13,6 +13,10 @@ export function Input({ onSubmit, placeholder = "Enter your prompt..." }: InputP
     if (key.return) {
       if (value.trim()) {
         onSubmit(value.trim());
+        // Clear so the field is ready for the next message (e.g. steering the
+        // running loop). Previously the input unmounted after the first submit
+        // so this never mattered.
+        setValue("");
       }
       return;
     }

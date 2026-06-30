@@ -29,6 +29,7 @@ export type HarnessEvent =
   | { type: "plan_approved" }
   | { type: "plan_rejected" }
   | { type: "iteration_start"; iteration: number; maxIterations: number }
+  | { type: "steering"; message: string }
   | { type: "executor_start"; itemId: string; itemDescription: string }
   | { type: "executor_token"; token: string }
   | { type: "executor_tool"; name: string; detail?: string }
@@ -67,7 +68,27 @@ export type HarnessOptions = {
     planPath: string,
     checklist: PlannerChecklistItem[]
   ) => Promise<"approve" | "reject">;
+  // Pulled at the top of each iteration to inject mid-run "steering" messages
+  // the user typed while the loop was running. Returns the queued messages and
+  // is expected to clear the queue. They are appended to the executor
+  // conversation as user turns before the next execute step.
+  drainSteering?: () => string[];
 };
+
+// Append any queued steering messages to the conversation as user turns and
+// surface each one to the UI. Called at the start of every iteration so
+// follow-ups the user typed mid-run take effect on the next execute step.
+function applySteering(
+  state: HarnessState,
+  onEvent: EventCallback,
+  drainSteering?: () => string[]
+): void {
+  const pending = drainSteering?.() ?? [];
+  for (const message of pending) {
+    state.messages.push({ role: "user", content: message });
+    onEvent({ type: "steering", message });
+  }
+}
 
 export async function runHarness(
   prompt: string,
@@ -131,6 +152,9 @@ export async function runHarness(
         iteration: state.iteration,
         maxIterations: state.maxIterations,
       });
+
+      // Inject any mid-run steering the user queued while we were busy
+      applySteering(state, onEvent, opts.drainSteering);
 
       // Find next item to work on
       const nextItem = getNextPendingItem(state);
@@ -219,17 +243,19 @@ export async function runHarness(
 export async function resumeHarness(
   state: HarnessState,
   config: ModelConfig,
-  onEvent: EventCallback
+  onEvent: EventCallback,
+  options?: Pick<HarnessOptions, "drainSteering">
 ): Promise<HarnessState> {
   // Reset iteration counter to allow more attempts
   state.iteration = 0;
-  return runHarnessLoop(state, config, onEvent);
+  return runHarnessLoop(state, config, onEvent, options);
 }
 
 async function runHarnessLoop(
   state: HarnessState,
   config: ModelConfig,
-  onEvent: EventCallback
+  onEvent: EventCallback,
+  options?: Pick<HarnessOptions, "drainSteering">
 ): Promise<HarnessState> {
   while (state.iteration < state.maxIterations) {
     state.iteration++;
@@ -238,6 +264,9 @@ async function runHarnessLoop(
       iteration: state.iteration,
       maxIterations: state.maxIterations,
     });
+
+    // Inject any mid-run steering the user queued while we were busy
+    applySteering(state, onEvent, options?.drainSteering);
 
     const nextItem = getNextPendingItem(state);
     if (nextItem) {

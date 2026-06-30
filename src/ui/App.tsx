@@ -64,6 +64,16 @@ export function App({
     ((decision: "approve" | "reject") => void) | null
   >(null);
 
+  // Messages the user typed mid-run. The harness loop drains this at the top
+  // of each iteration via the drainSteering callback below and injects them
+  // into the executor conversation.
+  const steeringQueueRef = useRef<string[]>([]);
+  const drainSteering = useCallback(() => {
+    const queued = steeringQueueRef.current;
+    steeringQueueRef.current = [];
+    return queued;
+  }, []);
+
   const addLog = useCallback((source: LogEntry["source"], message: string) => {
     setLogs((prev) => [...prev, { source, message }]);
   }, []);
@@ -104,6 +114,9 @@ export function App({
           setStatus("executing");
           setIteration(event.iteration);
           setMaxIter(event.maxIterations);
+          break;
+        case "steering":
+          addLog("user", `Steering applied: ${event.message}`);
           break;
         case "executor_start":
           addLog(
@@ -266,6 +279,7 @@ export function App({
         const state = await runHarness(prompt, config, handleEvent, {
           onPlanReview,
           maxIterations,
+          drainSteering,
         });
         setChecklist([...state.checklist]);
       } catch (e: unknown) {
@@ -274,16 +288,26 @@ export function App({
         setStatus("error");
       }
     },
-    [config, handleEvent, addLog, onPlanReview, maxIterations],
+    [config, handleEvent, addLog, onPlanReview, maxIterations, drainSteering],
   );
 
   const handleSubmit = useCallback(
     (value: string) => {
-      if (!value.trim() || submitted) return;
-      setSubmitted(true);
-      startRun(value);
+      const text = value.trim();
+      if (!text) return;
+      if (!submitted) {
+        // First prompt of the session — kick off the run.
+        setSubmitted(true);
+        startRun(text);
+        return;
+      }
+      // A run is already in flight: queue this as a steering message. The
+      // harness loop drains it (via drainSteering) at the start of the next
+      // iteration and injects it into the executor conversation.
+      steeringQueueRef.current.push(text);
+      addLog("user", `Steering queued (applies next iteration): ${text}`);
     },
-    [submitted, startRun],
+    [submitted, startRun, addLog],
   );
 
   const startResume = useCallback(
@@ -298,7 +322,9 @@ export function App({
           "system",
           `Loaded ${state.checklist.length} checklist items — continuing execution`,
         );
-        const finalState = await resumeHarness(state, config, handleEvent);
+        const finalState = await resumeHarness(state, config, handleEvent, {
+          drainSteering,
+        });
         setChecklist([...finalState.checklist]);
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -306,7 +332,7 @@ export function App({
         setStatus("error");
       }
     },
-    [config, handleEvent, addLog],
+    [config, handleEvent, addLog, drainSteering],
   );
 
   const handleRunSelected = useCallback(
@@ -364,8 +390,17 @@ export function App({
           checklist={planReviewState.checklist}
           onDecision={handlePlanDecision}
         />
-      ) : (
-        !submitted && <Input onSubmit={handleSubmit} />
+      ) : status === "complete" || status === "error" ? null : (
+        // Visible both before the first prompt and while a run is in flight, so
+        // the user can steer the running loop with follow-up messages.
+        <Input
+          onSubmit={handleSubmit}
+          placeholder={
+            submitted
+              ? "Steer the agent… (applies next iteration)"
+              : "Enter your prompt..."
+          }
+        />
       )}
       {(status === "complete" || status === "error") && (
         <Box paddingX={1}>

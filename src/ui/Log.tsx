@@ -24,7 +24,14 @@ function Thinking() {
 }
 
 export type LogEntry = {
-  source: "planner" | "executor" | "tool" | "verifier" | "system" | "error";
+  source:
+    | "planner"
+    | "executor"
+    | "tool"
+    | "verifier"
+    | "system"
+    | "user"
+    | "error";
   message: string;
   /** When true, this entry is still receiving streaming tokens and the last
    *  line should be rendered without a trailing newline indicator. */
@@ -42,6 +49,7 @@ const SOURCE_COLORS: Record<string, string> = {
   tool: "yellow",
   verifier: "magenta",
   system: "gray",
+  user: "green",
   error: "red",
 };
 
