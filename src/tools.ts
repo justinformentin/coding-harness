@@ -126,8 +126,18 @@ export function getToolByName(name: string): ToolDefinition | undefined {
   return tools.find((t) => t.name === name);
 }
 
-export function toolsToPromptDescription(): string {
-  return tools
+// Tools that only inspect the repository — safe for the planner to use during
+// exploration without mutating the working tree.
+export const READ_ONLY_TOOL_NAMES = [
+  "read_file",
+  "list_files",
+  "grep",
+  "git_diff",
+];
+
+export function toolsToPromptDescription(names?: string[]): string {
+  const list = names ? tools.filter((t) => names.includes(t.name)) : tools;
+  return list
     .map((t) => {
       const params = Object.entries(t.parameters)
         .map(

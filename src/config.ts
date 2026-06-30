@@ -1,6 +1,10 @@
 import { readFile } from "fs/promises";
 import { existsSync } from "fs";
-import { ModelConfigSchema, type ModelConfig } from "./schemas.js";
+import {
+  ModelConfigSchema,
+  type ModelConfig,
+  type Provider,
+} from "./schemas.js";
 
 const DEFAULT_CONFIG: ModelConfig = {
   planner: {
@@ -52,27 +56,21 @@ export async function loadConfig(): Promise<ModelConfig> {
   // Override with environment variables
   if (process.env.HARNESS_PLANNER_PROVIDER)
     config.planner.provider = process.env.HARNESS_PLANNER_PROVIDER as
-      | "openai"
-      | "anthropic"
-      | "local";
+      | Provider;
   if (process.env.HARNESS_PLANNER_MODEL)
     config.planner.model = process.env.HARNESS_PLANNER_MODEL;
   if (process.env.HARNESS_PLANNER_BASE_URL)
     config.planner.baseUrl = process.env.HARNESS_PLANNER_BASE_URL;
   if (process.env.HARNESS_EXECUTOR_PROVIDER)
     config.executor.provider = process.env.HARNESS_EXECUTOR_PROVIDER as
-      | "openai"
-      | "anthropic"
-      | "local";
+      | Provider;
   if (process.env.HARNESS_EXECUTOR_MODEL)
     config.executor.model = process.env.HARNESS_EXECUTOR_MODEL;
   if (process.env.HARNESS_EXECUTOR_BASE_URL)
     config.executor.baseUrl = process.env.HARNESS_EXECUTOR_BASE_URL;
   if (process.env.HARNESS_VERIFIER_PROVIDER)
     config.verifier.provider = process.env.HARNESS_VERIFIER_PROVIDER as
-      | "openai"
-      | "anthropic"
-      | "local";
+      | Provider;
   if (process.env.HARNESS_VERIFIER_MODEL)
     config.verifier.model = process.env.HARNESS_VERIFIER_MODEL;
   if (process.env.HARNESS_VERIFIER_BASE_URL)
@@ -89,6 +87,26 @@ export async function loadConfig(): Promise<ModelConfig> {
     config.planner.apiKey = process.env.ANTHROPIC_API_KEY;
   }
 
+  return config;
+}
+
+/**
+ * Override all three roles to use the local `claude` CLI ("claude-code"
+ * provider). This reuses whatever auth Claude Code is logged in with — no API
+ * key needed. The planner and verifier run read-only; the executor runs each
+ * task in its own subprocess with full tool access.
+ */
+export function applyClaudeCodeOverride(
+  config: ModelConfig,
+  model = "sonnet"
+): ModelConfig {
+  config.planner = { provider: "claude-code", model };
+  config.executor = {
+    provider: "claude-code",
+    model,
+    claudeCode: { dangerouslySkipPermissions: true },
+  };
+  config.verifier = { provider: "claude-code", model };
   return config;
 }
 

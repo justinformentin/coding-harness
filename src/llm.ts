@@ -11,6 +11,7 @@ import type {
   ToolDefinition,
 } from "./schemas.js";
 import { ModelConfigSchema } from "./schemas.js";
+import { runClaudeCode } from "./claude-code.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal message types
@@ -426,6 +427,53 @@ async function* chatStreamAnthropic(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Claude Code provider (subprocess)
+//
+// Used for the planner and verifier roles when provider is "claude-code".
+// These roles only need a single text completion, so we flatten the
+// conversation into one prompt and return the CLI's final result text.
+// Tools default to read-only so these roles never mutate the working tree.
+// The executor uses its own per-task path in executor.ts.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function flattenForClaudeCode(messages: Message[]): string {
+  return messages
+    .map((m) => {
+      if (m.role === "user") return m.content;
+      if (m.role === "assistant") return `[you previously responded]\n${m.content}`;
+      return `[tool result]\n${m.content}`;
+    })
+    .join("\n\n");
+}
+
+async function* chatStreamClaudeCode(
+  config: RoleModelConfig,
+  systemPrompt: string,
+  messages: Message[],
+  options: ChatOptions = {}
+): AsyncGenerator<string> {
+  const prompt = flattenForClaudeCode(messages);
+  const result = await runClaudeCode({
+    prompt,
+    systemPrompt: systemPrompt || undefined,
+    model: config.model,
+    allowedTools: config.claudeCode?.allowedTools,
+    // Read-only by default: planner/verifier inspect but never edit.
+    disallowedTools:
+      config.claudeCode?.disallowedTools ?? [
+        "Write",
+        "Edit",
+        "MultiEdit",
+        "NotebookEdit",
+      ],
+    dangerouslySkipPermissions:
+      config.claudeCode?.dangerouslySkipPermissions ?? true,
+    signal: options.signal,
+  });
+  if (result.text) yield result.text;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tool call parsing from accumulated text (freeform fallback)
 //
 // Used when native function calling is unavailable or as a fallback for
@@ -439,15 +487,13 @@ function parseToolCallsFromText(text: string): ToolCall[] {
 
   while ((match = toolBlockRegex.exec(text)) !== null) {
     try {
-      const parsed = JSON.parse(match[1].trim()) as {
-        name?: unknown;
-        arguments?: Record<string, unknown>;
-      };
-      if (parsed.name && typeof parsed.name === "string") {
+      const parsed = JSON.parse(match[1].trim()) as Record<string, unknown>;
+      const name = parsed.name;
+      if (name && typeof name === "string") {
         calls.push({
           id: `call_${calls.length}`,
-          tool_name: parsed.name,
-          arguments: parsed.arguments || {},
+          tool_name: name,
+          arguments: extractToolArguments(parsed),
         });
       }
     } catch {
@@ -456,6 +502,21 @@ function parseToolCallsFromText(text: string): ToolCall[] {
   }
 
   return calls;
+}
+
+/**
+ * Pull tool arguments out of a parsed tool block, tolerating both the documented
+ * shape `{"name","arguments":{...}}` and the common variant where models put the
+ * args flat alongside `name` (e.g. `{"name":"read_file","path":"x"}`).
+ */
+export function extractToolArguments(
+  parsed: Record<string, unknown>
+): Record<string, unknown> {
+  if (parsed.arguments && typeof parsed.arguments === "object") {
+    return parsed.arguments as Record<string, unknown>;
+  }
+  const { name: _name, arguments: _args, ...rest } = parsed;
+  return rest;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -510,6 +571,8 @@ export async function* chatStream(
 
   if (config.provider === "anthropic") {
     yield* chatStreamAnthropic(config, systemPrompt, chatMessages, options);
+  } else if (config.provider === "claude-code") {
+    yield* chatStreamClaudeCode(config, systemPrompt, chatMessages, options);
   } else {
     // "openai" and "local" both use OpenAI-compatible API
     let cfg = config;
@@ -533,6 +596,8 @@ export async function* chatStreamWithSystem(
 ): AsyncGenerator<string> {
   if (config.provider === "anthropic") {
     yield* chatStreamAnthropic(config, systemPrompt, messages, options);
+  } else if (config.provider === "claude-code") {
+    yield* chatStreamClaudeCode(config, systemPrompt, messages, options);
   } else {
     let cfg = config;
     if (config.provider === "openai" && !config.apiKey && process.env.OPENAI_API_KEY) {

@@ -1,16 +1,41 @@
-import type { HarnessState, VerifierReport } from "./schemas.js";
-import { toolsToPromptDescription } from "./tools.js";
+import type {
+  HarnessState,
+  PlannerChecklistItem,
+  VerifierReport,
+} from "./schemas.js";
+import { toolsToPromptDescription, READ_ONLY_TOOL_NAMES } from "./tools.js";
 
-export function plannerSystemPrompt(): string {
+export function plannerSystemPrompt(opts?: { freeformTools?: boolean }): string {
+  // When freeformTools is set (API/local providers), the planner explores the
+  // repo via freeform ```tool blocks that the harness executes. Claude Code has
+  // its own native tools, so that path omits these instructions.
+  const toolSection = opts?.freeformTools
+    ? `
+## Exploration tools
+
+Inspect the repository before planning. To call a tool, emit a fenced block exactly like this:
+\`\`\`tool
+{"name": "tool_name", "arguments": {"arg": "value"}}
+\`\`\`
+After you emit a tool call, STOP immediately and wait. Do NOT write or imagine the tool's output — the real result will be sent back to you in the next message. You may emit several tool blocks at once, but write nothing after the last one.
+
+Before you describe a change to a file, READ that file — never assume its structure, framework, or conventions. Verify entry points and existing patterns rather than guessing.
+
+${toolsToPromptDescription(READ_ONLY_TOOL_NAMES)}
+
+When you have seen enough, STOP calling tools and reply with ONLY the final plan JSON. Never put a tool block and the final JSON in the same message.
+`
+    : "";
+
   return `You are a planning model. Convert the user's request into a concrete checklist for a weaker coding model (the "executor") to execute.
 
 ## Operating constraints (read carefully)
 
-- You have NO tools and NO access to the repository. You cannot run commands, read files, or inspect the codebase. Do not ask to.
-- Do NOT ask the user clarifying questions and do NOT request more information. Make reasonable assumptions and encode any uncertainty as checklist items for the executor to resolve.
-- The executor DOES have tools (read files, edit files, run commands). Exploration and discovery are its job, not yours. When the task depends on details of an unknown codebase, make the FIRST checklist item an exploration step (e.g. "Inspect project structure and identify the relevant files") with concrete acceptance criteria.
-- Your entire response MUST be a single valid JSON object and nothing else. No prose, no explanation, no markdown fences, no code blocks, no commentary before or after. The very first character of your response must be \`{\`.
-
+- Use whatever tools you have (read files, search, run commands) to inspect the repository BEFORE planning. Ground every checklist item in what the code actually looks like — don't guess at file names, structure, or conventions you can verify. If you have no tools available, plan from reasonable assumptions instead.
+- Do NOT ask the user clarifying questions and do NOT request more information. Make reasonable assumptions and encode any remaining uncertainty as checklist items for the executor to resolve.
+- The executor also has tools and does the actual implementation. Still, when the task depends on details of an unknown codebase you couldn't fully pin down, make the FIRST checklist item an exploration step (e.g. "Inspect project structure and identify the relevant files") with concrete acceptance criteria.
+- After any exploration, your FINAL response MUST be a single valid JSON object and nothing else. No prose, no explanation, no markdown fences, no code blocks, no commentary before or after. The very first character of that response must be \`{\`.
+${toolSection}
 Return ONLY valid JSON matching this schema:
 {
   "goal": "string — one sentence summary",
@@ -78,6 +103,78 @@ ${checklistStr}
 - Do NOT claim the entire task is complete unless you have evidence for every item
 - Be specific about what you changed and what commands you ran
 - If you encounter an error, try to fix it rather than giving up`;
+}
+
+/**
+ * Prompt for a single sub-Claude run that completes EXACTLY ONE checklist item.
+ * Each task runs in its own `claude` subprocess with a fresh context window, so
+ * we hand it only what it needs for this one item plus any verifier feedback
+ * from a previous attempt at the same item.
+ */
+export function claudeCodeExecutorPrompt(
+  state: HarnessState,
+  item: PlannerChecklistItem
+): string {
+  const criteria =
+    item.acceptanceCriteria.map((c) => `- ${c}`).join("\n") ||
+    "- (none specified)";
+  const evidence =
+    item.evidenceRequired.map((e) => `- ${e}`).join("\n") ||
+    "- (none specified)";
+  const suggested =
+    item.suggestedCommands && item.suggestedCommands.length > 0
+      ? `\n## Suggested commands\n${item.suggestedCommands
+          .map((c) => `- ${c}`)
+          .join("\n")}\n`
+      : "";
+
+  // If a previous attempt at THIS item was judged incomplete, fold the
+  // verifier's feedback in so the fresh subprocess knows what to fix.
+  let feedback = "";
+  const report = state.verifierReport;
+  if (report && report.incompleteItems.includes(item.id)) {
+    const missing = report.missingEvidence.filter((m) => m.includes(item.id));
+    feedback =
+      `\n## Feedback from the previous attempt\n` +
+      `The verifier marked this task incomplete.\n` +
+      (missing.length > 0
+        ? missing.map((m) => `- ${m}`).join("\n") + "\n"
+        : "") +
+      (report.nextInstruction
+        ? `Next instruction: ${report.nextInstruction}\n`
+        : "");
+  }
+
+  return `You are an autonomous coding agent. Complete EXACTLY ONE task from a larger plan, then stop.
+
+## Overall goal
+${state.originalPrompt}
+
+## Your task (id: ${item.id})
+${item.description}
+
+## Acceptance criteria
+${criteria}
+
+## Evidence the verifier will check
+${evidence}${suggested}${feedback}
+## Instructions
+- Work ONLY on this task. Do not start other tasks from the plan.
+- Use your tools to read, create, and edit files and to run commands.
+- Actually run the commands needed to prove the task works (tests, typecheck, build, etc.).
+- Do not ask questions; make reasonable decisions and proceed.
+- When done, end your FINAL message with a single fenced json block in EXACTLY this shape:
+
+\`\`\`json
+{
+  "summary": "one or two sentences on what you did",
+  "filesChanged": ["relative/path.ts"],
+  "commandsRun": [{"command": "npm test", "output": "trimmed relevant output"}],
+  "evidenceFound": ["concrete evidence that each acceptance criterion is met"]
+}
+\`\`\`
+
+Trim command outputs to the relevant lines. The json block must be valid JSON.`;
 }
 
 export function verifierSystemPrompt(): string {

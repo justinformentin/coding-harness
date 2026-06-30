@@ -2,7 +2,7 @@ import type { HarnessState, PlannerChecklistItem } from "./schemas.js";
 
 export function createInitialState(
   prompt: string,
-  maxIterations: number = 10
+  maxIterations: number = 25
 ): HarnessState {
   const now = Date.now();
   const date = new Date(now).toISOString().split("T")[0];

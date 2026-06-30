@@ -63,7 +63,12 @@ export const VerifierReportSchema = z.object({
 
 export type VerifierReport = z.infer<typeof VerifierReportSchema>;
 
-export const ProviderSchema = z.enum(["openai", "anthropic", "local"]);
+export const ProviderSchema = z.enum([
+  "openai",
+  "anthropic",
+  "local",
+  "claude-code",
+]);
 export type Provider = z.infer<typeof ProviderSchema>;
 
 export const RoleModelConfigSchema = z.object({
@@ -84,6 +89,15 @@ export const RoleModelConfigSchema = z.object({
       supportsToolCalling: z.boolean().optional(),
       supportsJsonMode: z.boolean().optional(),
       maxTokens: z.number().optional(),
+    })
+    .optional(),
+  // Options for the "claude-code" provider, which shells out to the local
+  // `claude` CLI (using whatever auth the user already logged in with).
+  claudeCode: z
+    .object({
+      allowedTools: z.array(z.string()).optional(),
+      disallowedTools: z.array(z.string()).optional(),
+      dangerouslySkipPermissions: z.boolean().optional(),
     })
     .optional(),
 });
