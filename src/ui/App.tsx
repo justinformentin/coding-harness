@@ -15,6 +15,7 @@ type AppProps = {
   initialPrompt?: string;
   resumeRunId?: string;
   resumePicker?: boolean;
+  maxIterations?: number;
 };
 
 type Status =
@@ -37,21 +38,22 @@ export function App({
   initialPrompt,
   resumeRunId,
   resumePicker,
+  maxIterations,
 }: AppProps) {
   const { exit } = useApp();
   const [submitted, setSubmitted] = useState(
-    Boolean(initialPrompt || resumeRunId || resumePicker)
+    Boolean(initialPrompt || resumeRunId || resumePicker),
   );
   const [status, setStatus] = useState<Status>(
     resumePicker
       ? "resume_picker"
       : initialPrompt || resumeRunId
         ? "planning"
-        : "idle"
+        : "idle",
   );
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [iteration, setIteration] = useState(0);
-  const [maxIter, setMaxIter] = useState(10);
+  const [maxIter, setMaxIter] = useState(maxIterations ?? 25);
   const [checklist, setChecklist] = useState<PlannerChecklistItem[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [planReviewState, setPlanReviewState] =
@@ -62,12 +64,9 @@ export function App({
     ((decision: "approve" | "reject") => void) | null
   >(null);
 
-  const addLog = useCallback(
-    (source: LogEntry["source"], message: string) => {
-      setLogs((prev) => [...prev, { source, message }]);
-    },
-    []
-  );
+  const addLog = useCallback((source: LogEntry["source"], message: string) => {
+    setLogs((prev) => [...prev, { source, message }]);
+  }, []);
 
   const handleEvent = useCallback(
     (event: HarnessEvent) => {
@@ -88,7 +87,7 @@ export function App({
           });
           addLog(
             "system",
-            `Plan ready — ${event.checklist.length} items. Plan saved to ${event.planPath}`
+            `Plan ready — ${event.checklist.length} items. Plan saved to ${event.planPath}`,
           );
           break;
         case "plan_approved":
@@ -109,7 +108,7 @@ export function App({
         case "executor_start":
           addLog(
             "executor",
-            `Working on: ${event.itemId} — ${event.itemDescription}`
+            `Working on: ${event.itemId} — ${event.itemDescription}`,
           );
           // Add a streaming placeholder entry that tokens will append into
           setLogs((prev) => [
@@ -130,6 +129,26 @@ export function App({
               };
             }
             return updated;
+          });
+          break;
+        case "executor_tool":
+          // Surface each tool the executor invokes as it happens. Insert it
+          // just *before* the trailing streaming placeholder so that entry
+          // stays last (the token handlers rely on that invariant).
+          setLogs((prev) => {
+            const entry: LogEntry = {
+              source: "tool",
+              message: event.detail
+                ? `${event.name} — ${event.detail}`
+                : event.name,
+            };
+            const lastIdx = prev.length - 1;
+            if (lastIdx >= 0 && prev[lastIdx].streaming) {
+              const updated = [...prev];
+              updated.splice(lastIdx, 0, entry);
+              return updated;
+            }
+            return [...prev, entry];
           });
           break;
         case "executor_complete":
@@ -154,7 +173,7 @@ export function App({
               : event.output;
           addLog(
             "tool",
-            `${event.name} ${event.success ? "OK" : "FAIL"}: ${truncated}`
+            `${event.name} ${event.success ? "OK" : "FAIL"}: ${truncated}`,
           );
           break;
         }
@@ -169,10 +188,12 @@ export function App({
           } else {
             addLog("verifier", `Incomplete: ${r.incompleteItems.join(", ")}`);
             if (r.missingEvidence.length > 0) {
-              addLog(
-                "verifier",
-                `Missing: ${r.missingEvidence.join("; ")}`
-              );
+              const joined = r.missingEvidence.join("; ");
+              const truncated =
+                joined.length > 200
+                  ? `View full instruction in .runs/${event.runId}/verifier_report.json`
+                  : joined;
+              addLog("verifier", `Missing: ${truncated}`);
             }
           }
           // Update checklist from report
@@ -187,21 +208,22 @@ export function App({
           break;
         }
         case "repair":
-          addLog("system", `Repair: ${event.instruction}`);
+          const truncated =
+            event.instruction.length > 200
+              ? `View full instruction in .runs/${event.runId}/verifier_report.json`
+              : event.instruction;
+          addLog("system", `Repair: ${truncated}`);
           break;
         case "complete":
           setStatus("complete");
           setChecklist([...event.state.checklist]);
-          addLog(
-            "system",
-            `Done! Run saved to .runs/${event.state.runId}`
-          );
+          addLog("system", `Done! Run saved to .runs/${event.state.runId}`);
           break;
         case "max_iterations":
           setStatus("error");
           addLog(
             "error",
-            `Max iterations reached. Run saved to .runs/${event.state.runId}`
+            `Max iterations reached. Run saved to .runs/${event.state.runId}`,
           );
           break;
         case "error":
@@ -210,14 +232,14 @@ export function App({
           break;
       }
     },
-    [addLog]
+    [addLog],
   );
 
   // Callback passed to runHarness that suspends until the user decides
   const onPlanReview = useCallback(
     (
       planPath: string,
-      reviewChecklist: PlannerChecklistItem[]
+      reviewChecklist: PlannerChecklistItem[],
     ): Promise<"approve" | "reject"> => {
       return new Promise((resolve) => {
         // Store the resolve fn; the PlanReview component calls it via handlePlanDecision
@@ -227,18 +249,15 @@ export function App({
         setStatus("plan_review");
       });
     },
-    []
+    [],
   );
 
-  const handlePlanDecision = useCallback(
-    (decision: "approve" | "reject") => {
-      if (planReviewResolveRef.current) {
-        planReviewResolveRef.current(decision);
-        planReviewResolveRef.current = null;
-      }
-    },
-    []
-  );
+  const handlePlanDecision = useCallback((decision: "approve" | "reject") => {
+    if (planReviewResolveRef.current) {
+      planReviewResolveRef.current(decision);
+      planReviewResolveRef.current = null;
+    }
+  }, []);
 
   const startRun = useCallback(
     async (prompt: string) => {
@@ -246,6 +265,7 @@ export function App({
       try {
         const state = await runHarness(prompt, config, handleEvent, {
           onPlanReview,
+          maxIterations,
         });
         setChecklist([...state.checklist]);
       } catch (e: unknown) {
@@ -254,7 +274,7 @@ export function App({
         setStatus("error");
       }
     },
-    [config, handleEvent, addLog, onPlanReview]
+    [config, handleEvent, addLog, onPlanReview, maxIterations],
   );
 
   const handleSubmit = useCallback(
@@ -263,7 +283,7 @@ export function App({
       setSubmitted(true);
       startRun(value);
     },
-    [submitted, startRun]
+    [submitted, startRun],
   );
 
   const startResume = useCallback(
@@ -276,7 +296,7 @@ export function App({
         setMaxIter(state.maxIterations);
         addLog(
           "system",
-          `Loaded ${state.checklist.length} checklist items — continuing execution`
+          `Loaded ${state.checklist.length} checklist items — continuing execution`,
         );
         const finalState = await resumeHarness(state, config, handleEvent);
         setChecklist([...finalState.checklist]);
@@ -286,14 +306,14 @@ export function App({
         setStatus("error");
       }
     },
-    [config, handleEvent, addLog]
+    [config, handleEvent, addLog],
   );
 
   const handleRunSelected = useCallback(
     (runId: string) => {
       startResume(runId);
     },
-    [startResume]
+    [startResume],
   );
 
   // Start automatically based on how the app was launched
@@ -337,11 +357,7 @@ export function App({
         <Log entries={logs} />
       </Box>
       {status === "resume_picker" && runs.length > 0 ? (
-        <RunPicker
-          runs={runs}
-          onSelect={handleRunSelected}
-          onCancel={exit}
-        />
+        <RunPicker runs={runs} onSelect={handleRunSelected} onCancel={exit} />
       ) : status === "plan_review" && planReviewState ? (
         <PlanReview
           planPath={planReviewState.planPath}
