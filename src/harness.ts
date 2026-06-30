@@ -31,16 +31,35 @@ export type HarnessEvent =
   | { type: "iteration_start"; iteration: number; maxIterations: number }
   | { type: "executor_start"; itemId: string; itemDescription: string }
   | { type: "executor_token"; token: string }
+  | { type: "executor_tool"; name: string; detail?: string }
   | { type: "executor_complete"; response: string; toolCalls: number }
   | { type: "tool_result"; name: string; success: boolean; output: string }
   | { type: "verify_start" }
-  | { type: "verify_complete"; report: VerifierReport }
-  | { type: "repair"; instruction: string }
+  | { type: "verify_complete"; report: VerifierReport; runId: string }
+  | { type: "repair"; instruction: string; runId: string }
   | { type: "complete"; state: HarnessState }
   | { type: "max_iterations"; state: HarnessState }
   | { type: "error"; message: string };
 
 export type EventCallback = (event: HarnessEvent) => void;
+
+// Pull a short, human-readable detail out of a tool's input so the log line
+// reads "Edit src/foo.ts" rather than just "Edit". Falls back to nothing.
+function toolDetail(input: unknown): string | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const o = input as Record<string, unknown>;
+  const candidate =
+    o.file_path ?? o.path ?? o.command ?? o.pattern ?? o.url ?? o.description;
+  if (typeof candidate !== "string") return undefined;
+  const trimmed = candidate.trim().replace(/\s+/g, " ");
+  return trimmed.length > 80 ? trimmed.slice(0, 80) + "…" : trimmed;
+}
+
+// Default iteration budget when the caller doesn't pin one. After planning we
+// scale up to ~3 iterations per checklist item so larger plans get room to
+// finish (each item may need an execute + a repair cycle or two).
+const DEFAULT_MAX_ITERATIONS = 25;
+const ITERATIONS_PER_ITEM = 3;
 
 export type HarnessOptions = {
   maxIterations?: number;
@@ -59,7 +78,12 @@ export async function runHarness(
   // Support legacy numeric fourth argument for backward compatibility
   const opts: HarnessOptions =
     typeof options === "number" ? { maxIterations: options } : options ?? {};
-  const maxIterations = opts.maxIterations ?? 10;
+  // An explicit value (CLI flag / legacy arg) is a hard ceiling. When omitted,
+  // we start from a generous default and then scale to the plan size below, so
+  // a slow model working item-by-item doesn't exhaust the budget mid-task.
+  const explicitMax =
+    typeof options === "number" ? options : opts.maxIterations;
+  const maxIterations = explicitMax ?? DEFAULT_MAX_ITERATIONS;
 
   const state = createInitialState(prompt, maxIterations);
 
@@ -71,6 +95,15 @@ export async function runHarness(
     onEvent({ type: "plan_start" });
     state.checklist = await plan(prompt, config.planner);
     await saveChecklist(state);
+
+    // Scale the iteration budget to the plan size unless the caller pinned one.
+    if (explicitMax === undefined) {
+      state.maxIterations = Math.max(
+        DEFAULT_MAX_ITERATIONS,
+        state.checklist.length * ITERATIONS_PER_ITEM
+      );
+    }
+
     onEvent({ type: "plan_complete", itemCount: state.checklist.length });
 
     // Save plan as readable markdown and show it for review
@@ -109,9 +142,15 @@ export async function runHarness(
         });
       }
 
-      // Execute — stream tokens to the TUI via the executor_token event
-      const result = await execute(state, config.executor, (token) => {
-        onEvent({ type: "executor_token", token });
+      // Execute — stream tokens and tool uses to the TUI in real time
+      const result = await execute(state, config.executor, {
+        onToken: (token) => onEvent({ type: "executor_token", token }),
+        onToolUse: (use) =>
+          onEvent({
+            type: "executor_tool",
+            name: use.name,
+            detail: toolDetail(use.input),
+          }),
       });
       onEvent({
         type: "executor_complete",
@@ -134,7 +173,7 @@ export async function runHarness(
       const report = await verify(state, config.verifier);
       state.verifierReport = report;
       await appendVerifierReport(state, report);
-      onEvent({ type: "verify_complete", report });
+      onEvent({ type: "verify_complete", report, runId: state.runId });
 
       // Update checklist statuses based on verifier report
       for (const itemId of report.completedItems) {
@@ -158,7 +197,11 @@ export async function runHarness(
       // Repair prompt
       const repair = repairPrompt(report);
       state.messages.push({ role: "user", content: repair });
-      onEvent({ type: "repair", instruction: report.nextInstruction });
+      onEvent({
+        type: "repair",
+        instruction: report.nextInstruction,
+        runId: state.runId,
+      });
     }
 
     // Max iterations reached
@@ -205,8 +248,14 @@ async function runHarnessLoop(
       });
     }
 
-    const result = await execute(state, config.executor, (token) => {
-      onEvent({ type: "executor_token", token });
+    const result = await execute(state, config.executor, {
+      onToken: (token) => onEvent({ type: "executor_token", token }),
+      onToolUse: (use) =>
+        onEvent({
+          type: "executor_tool",
+          name: use.name,
+          detail: toolDetail(use.input),
+        }),
     });
     onEvent({
       type: "executor_complete",
@@ -227,7 +276,7 @@ async function runHarnessLoop(
     const report = await verify(state, config.verifier);
     state.verifierReport = report;
     await appendVerifierReport(state, report);
-    onEvent({ type: "verify_complete", report });
+    onEvent({ type: "verify_complete", report, runId: state.runId });
 
     for (const itemId of report.completedItems) {
       const item = state.checklist.find((i) => i.id === itemId);
@@ -248,7 +297,11 @@ async function runHarnessLoop(
 
     const repair = repairPrompt(report);
     state.messages.push({ role: "user", content: repair });
-    onEvent({ type: "repair", instruction: report.nextInstruction });
+    onEvent({
+      type: "repair",
+      instruction: report.nextInstruction,
+      runId: state.runId,
+    });
   }
 
   onEvent({ type: "max_iterations", state });
