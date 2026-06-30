@@ -7,38 +7,88 @@ import {
   type Message,
 } from "./schemas.js";
 
+// How many times to re-prompt the planner when it returns something that
+// isn't valid JSON matching the schema. Models (especially ones without a
+// JSON mode) sometimes reply conversationally — asking to explore the repo,
+// wrapping output in prose, etc. A corrective follow-up usually fixes it.
+const MAX_PLAN_ATTEMPTS = 3;
+
 export async function plan(
   prompt: string,
   config: RoleModelConfig
 ): Promise<PlannerChecklistItem[]> {
   const messages: Message[] = [{ role: "user", content: prompt }];
-  const { content } = await chat(config, plannerSystemPrompt(), messages);
+  let lastError = "";
 
-  // Extract JSON from response (model might wrap it in markdown code blocks)
+  for (let attempt = 1; attempt <= MAX_PLAN_ATTEMPTS; attempt++) {
+    const { content } = await chat(config, plannerSystemPrompt(), messages, {
+      // Hint JSON mode to providers that support it (OpenAI, JSON-capable
+      // local models). Providers that don't (e.g. Anthropic) ignore this.
+      responseFormat: "json_object",
+    });
+
+    const parsed = parsePlannerOutput(content);
+    if (parsed.ok) {
+      // Ensure all items start as pending with empty evidenceFound
+      return parsed.value.checklist.map((item) => ({
+        ...item,
+        status: "pending" as const,
+        evidenceFound: [],
+      }));
+    }
+
+    lastError = parsed.error;
+
+    // Feed the bad response back and ask the model to correct itself.
+    if (attempt < MAX_PLAN_ATTEMPTS) {
+      messages.push({ role: "assistant", content });
+      messages.push({
+        role: "user",
+        content:
+          `That response was not accepted: ${parsed.error}\n\n` +
+          `You have no tools and cannot inspect the repository — do not ask ` +
+          `questions or request to explore. Reply with ONLY a single valid ` +
+          `JSON object matching the required schema. The first character of ` +
+          `your reply must be "{". Output nothing else.`,
+      });
+    }
+  }
+
+  throw new Error(
+    `Planner failed to produce valid JSON after ${MAX_PLAN_ATTEMPTS} attempts. ` +
+      `Last error: ${lastError}`
+  );
+}
+
+type ParseResult =
+  | { ok: true; value: { goal: string; checklist: PlannerChecklistItem[] } }
+  | { ok: false; error: string };
+
+function parsePlannerOutput(content: string): ParseResult {
   const jsonStr = extractJSON(content);
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(jsonStr);
   } catch {
-    throw new Error(
-      `Planner returned invalid JSON: ${content.slice(0, 200)}...`
-    );
+    const preview = content.trim().slice(0, 200);
+    return {
+      ok: false,
+      error: `response was not valid JSON (got: "${preview}${
+        content.length > 200 ? "…" : ""
+      }")`,
+    };
   }
 
   const result = PlannerOutputSchema.safeParse(parsed);
   if (!result.success) {
-    throw new Error(
-      `Planner output doesn't match schema: ${result.error.message}`
-    );
+    return {
+      ok: false,
+      error: `JSON did not match the required schema: ${result.error.message}`,
+    };
   }
 
-  // Ensure all items start as pending with empty evidenceFound
-  return result.data.checklist.map((item) => ({
-    ...item,
-    status: "pending" as const,
-    evidenceFound: [],
-  }));
+  return { ok: true, value: result.data };
 }
 
 function extractJSON(text: string): string {

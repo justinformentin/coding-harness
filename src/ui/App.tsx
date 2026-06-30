@@ -5,16 +5,21 @@ import { Checklist } from "./Checklist.js";
 import { Log, type LogEntry } from "./Log.js";
 import { Input } from "./Input.js";
 import { PlanReview } from "./PlanReview.js";
-import { runHarness, type HarnessEvent } from "../harness.js";
+import { RunPicker } from "./RunPicker.js";
+import { runHarness, resumeHarness, type HarnessEvent } from "../harness.js";
+import { listRunsDetailed, loadState, type RunSummary } from "../run-store.js";
 import type { ModelConfig, PlannerChecklistItem } from "../schemas.js";
 
 type AppProps = {
   config: ModelConfig;
   initialPrompt?: string;
+  resumeRunId?: string;
+  resumePicker?: boolean;
 };
 
 type Status =
   | "idle"
+  | "resume_picker"
   | "planning"
   | "plan_review"
   | "executing"
@@ -27,12 +32,24 @@ type PlanReviewState = {
   checklist: PlannerChecklistItem[];
 };
 
-export function App({ config, initialPrompt }: AppProps) {
+export function App({
+  config,
+  initialPrompt,
+  resumeRunId,
+  resumePicker,
+}: AppProps) {
   const { exit } = useApp();
-  const [submitted, setSubmitted] = useState(false);
-  const [status, setStatus] = useState<Status>(
-    initialPrompt ? "planning" : "idle"
+  const [submitted, setSubmitted] = useState(
+    Boolean(initialPrompt || resumeRunId || resumePicker)
   );
+  const [status, setStatus] = useState<Status>(
+    resumePicker
+      ? "resume_picker"
+      : initialPrompt || resumeRunId
+        ? "planning"
+        : "idle"
+  );
+  const [runs, setRuns] = useState<RunSummary[]>([]);
   const [iteration, setIteration] = useState(0);
   const [maxIter, setMaxIter] = useState(10);
   const [checklist, setChecklist] = useState<PlannerChecklistItem[]>([]);
@@ -249,11 +266,54 @@ export function App({ config, initialPrompt }: AppProps) {
     [submitted, startRun]
   );
 
-  // Start automatically if initialPrompt was provided
+  const startResume = useCallback(
+    async (runId: string) => {
+      setStatus("planning");
+      addLog("system", `Resuming run ${runId}`);
+      try {
+        const state = await loadState(runId);
+        setChecklist([...state.checklist]);
+        setMaxIter(state.maxIterations);
+        addLog(
+          "system",
+          `Loaded ${state.checklist.length} checklist items — continuing execution`
+        );
+        const finalState = await resumeHarness(state, config, handleEvent);
+        setChecklist([...finalState.checklist]);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        addLog("error", `Could not resume run ${runId}: ${msg}`);
+        setStatus("error");
+      }
+    },
+    [config, handleEvent, addLog]
+  );
+
+  const handleRunSelected = useCallback(
+    (runId: string) => {
+      startResume(runId);
+    },
+    [startResume]
+  );
+
+  // Start automatically based on how the app was launched
   useEffect(() => {
     if (initialPrompt) {
       setSubmitted(true);
       startRun(initialPrompt);
+    } else if (resumeRunId) {
+      setSubmitted(true);
+      startResume(resumeRunId);
+    } else if (resumePicker) {
+      listRunsDetailed().then((loaded) => {
+        if (loaded.length === 0) {
+          addLog("error", "No runs found to resume.");
+          setStatus("error");
+        } else {
+          setRuns(loaded);
+          setStatus("resume_picker");
+        }
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -276,7 +336,13 @@ export function App({ config, initialPrompt }: AppProps) {
       >
         <Log entries={logs} />
       </Box>
-      {status === "plan_review" && planReviewState ? (
+      {status === "resume_picker" && runs.length > 0 ? (
+        <RunPicker
+          runs={runs}
+          onSelect={handleRunSelected}
+          onCancel={exit}
+        />
+      ) : status === "plan_review" && planReviewState ? (
         <PlanReview
           planPath={planReviewState.planPath}
           checklist={planReviewState.checklist}

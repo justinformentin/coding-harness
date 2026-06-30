@@ -6,6 +6,7 @@ type HeaderProps = {
   maxIterations: number;
   status:
     | "idle"
+    | "resume_picker"
     | "planning"
     | "plan_review"
     | "executing"
@@ -17,6 +18,7 @@ type HeaderProps = {
 export function Header({ iteration, maxIterations, status }: HeaderProps) {
   const statusColors: Record<string, string> = {
     idle: "gray",
+    resume_picker: "cyan",
     planning: "yellow",
     plan_review: "cyan",
     executing: "blue",

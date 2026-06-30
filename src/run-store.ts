@@ -170,3 +170,52 @@ export async function listRuns(): Promise<string[]> {
     return [];
   }
 }
+
+export type RunSummary = {
+  runId: string;
+  prompt: string;
+  iteration: number;
+  maxIterations: number;
+  doneItems: number;
+  totalItems: number;
+  hasState: boolean;
+};
+
+export async function listRunsDetailed(): Promise<RunSummary[]> {
+  const runIds = await listRuns();
+  const summaries: RunSummary[] = [];
+  for (const runId of runIds) {
+    const dir = join(RUNS_DIR, runId);
+    let prompt = "(no prompt)";
+    try {
+      prompt = (await readFile(join(dir, "prompt.md"), "utf-8")).trim();
+    } catch {
+      // ignore — prompt may not exist yet
+    }
+    const summary: RunSummary = {
+      runId,
+      prompt: prompt.split("\n")[0].slice(0, 80),
+      iteration: 0,
+      maxIterations: 0,
+      doneItems: 0,
+      totalItems: 0,
+      hasState: false,
+    };
+    try {
+      const state = JSON.parse(
+        await readFile(join(dir, "state.json"), "utf-8")
+      ) as HarnessState;
+      summary.iteration = state.iteration;
+      summary.maxIterations = state.maxIterations;
+      summary.totalItems = state.checklist.length;
+      summary.doneItems = state.checklist.filter(
+        (i) => i.status === "done"
+      ).length;
+      summary.hasState = true;
+    } catch {
+      // No checkpoint saved (e.g. errored before first checkpoint)
+    }
+    summaries.push(summary);
+  }
+  return summaries;
+}

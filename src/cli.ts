@@ -3,7 +3,7 @@ import React from "react";
 import { render } from "ink";
 import { App } from "./ui/App.js";
 import { loadConfig, printConfig } from "./config.js";
-import { listRuns, loadState } from "./run-store.js";
+import { listRuns } from "./run-store.js";
 
 async function main() {
   const args = process.argv.slice(2);
@@ -30,23 +30,19 @@ async function main() {
 
   const resumeIdx = args.indexOf("--resume");
   if (resumeIdx !== -1) {
-    const runId = args[resumeIdx + 1];
-    if (!runId) {
-      console.error("Usage: harness --resume <runId>");
-      process.exit(1);
-    }
-    try {
-      const state = await loadState(runId);
-      console.log(
-        `Resuming run ${runId} (iteration ${state.iteration}/${state.maxIterations})`
+    // A run id is only consumed if the next arg isn't another flag
+    const next = args[resumeIdx + 1];
+    const runId = next && !next.startsWith("--") ? next : undefined;
+    const config = await loadConfig();
+    if (runId) {
+      render(
+        React.createElement(App, { config, resumeRunId: runId })
       );
-      // TODO: implement full resume through TUI
-      process.exit(0);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.error(`Could not load run ${runId}: ${msg}`);
-      process.exit(1);
+    } else {
+      // No id — let the user pick interactively from recent runs
+      render(React.createElement(App, { config, resumePicker: true }));
     }
+    return;
   }
 
   if (args.includes("--help") || args.includes("-h")) {
@@ -58,7 +54,8 @@ Usage:
   harness              Start interactive session
   harness --config     Show model configuration
   harness --list       List recent runs
-  harness --resume ID  Resume a previous run
+  harness --resume ID  Resume a specific run by id
+  harness --resume     Pick a recent run to resume interactively
   harness --help       Show this help
     `.trim()
     );

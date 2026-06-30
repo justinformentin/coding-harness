@@ -1,4 +1,3 @@
 node_modules
 dist
 .runs
-.harness.json
