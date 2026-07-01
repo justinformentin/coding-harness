@@ -1,6 +1,12 @@
 import { chat, chatStreamWithSystem, extractToolArguments } from "./llm.js";
 import { executorSystemPrompt, claudeCodeExecutorPrompt } from "./prompts.js";
 import { executeTool } from "./tools.js";
+import {
+  FINISH_TOOL_NAME,
+  parseFinishCall,
+  normalizeStopReason,
+  decideExecutorDone,
+} from "./completion.js";
 import { runClaudeCode, gitChangedFiles } from "./claude-code.js";
 import type {
   HarnessState,
@@ -25,41 +31,143 @@ export type ExecutorCallbacks = {
   onToken?: (token: string) => void;
   /** Fires in real time each time the executor invokes a tool. */
   onToolUse?: (use: { name: string; input: unknown }) => void;
+  /**
+   * Fires when the executor begins work on a checklist item (one call per item
+   * for claude-code, once for the current target on text providers). Lets the
+   * harness surface per-item progress now that a single execute call may span
+   * several items / turns.
+   */
+  onItemStart?: (item: { id: string; description: string }) => void;
 };
 
-export async function execute(
+// Safety cap on how many model turns one execute-to-completion pass may take on
+// the text providers (openai / anthropic / local) before we hand control back
+// to the verifier. Guards against a model that keeps calling tools forever.
+// Not used by claude-code, whose sub-Claude bounds itself internally.
+const MAX_EXECUTOR_STEPS = 50;
+
+/**
+ * Drive the executor to completion for a single iteration, then return.
+ *
+ * "Completion" is provider-specific:
+ *   - claude-code: each sub-Claude already runs its own task to completion, so
+ *     completion here means draining every outstanding checklist item — one
+ *     sub-Claude per item.
+ *   - openai / anthropic / local: a single chat call is just one turn, so we
+ *     loop the call-model → run-tools cycle until the model stops requesting
+ *     tools (or we hit MAX_EXECUTOR_STEPS).
+ *
+ * The harness calls this once per iteration and only verifies afterwards, so
+ * verification sees a finished attempt rather than firing after every step.
+ */
+export async function executeToCompletion(
   state: HarnessState,
   config: RoleModelConfig,
   callbacks?: ExecutorCallbacks
 ): Promise<ExecutorResult> {
-  const onToken = callbacks?.onToken;
-  // Claude Code provider: spawn a fresh sub-Claude scoped to a single item.
+  // Provider-specific: claude-code spawns one fresh sub-Claude per item.
   if (config.provider === "claude-code") {
-    return executeItemWithClaudeCode(state, config, callbacks);
+    return executeAllItemsWithClaudeCode(state, config, callbacks);
   }
+  // Provider-specific: openai / anthropic / local share the freeform-tool loop.
+  return executeTextToCompletion(state, config, callbacks);
+}
 
-  // Mark next pending item as in_progress
+// ─────────────────────────────────────────────────────────────────────────────
+// Text providers (openai / anthropic / local): agentic turn loop
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function executeTextToCompletion(
+  state: HarnessState,
+  config: RoleModelConfig,
+  callbacks?: ExecutorCallbacks
+): Promise<ExecutorResult> {
+  // Text providers don't map individual turns to checklist items, so we just
+  // mark the next pending item in_progress and announce the current target.
   const nextItem = state.checklist.find((i) => i.status === "pending");
   if (nextItem) nextItem.status = "in_progress";
+  const current = state.checklist.find((i) => i.status === "in_progress");
+  if (current) {
+    callbacks?.onItemStart?.({
+      id: current.id,
+      description: current.description,
+    });
+  }
 
+  const aggregate: ExecutorResult = {
+    response: "",
+    toolCalls: [],
+    toolResults: [],
+  };
+
+  for (let step = 0; step < MAX_EXECUTOR_STEPS; step++) {
+    const turn = await executeTextTurn(state, config, callbacks);
+    aggregate.response += (aggregate.response ? "\n" : "") + turn.response;
+    aggregate.toolCalls.push(...turn.toolCalls);
+    aggregate.toolResults.push(...turn.toolResults);
+
+    // Record any explicit completion claim so the verifier can credit manual
+    // items the model says it finished.
+    const finish = parseFinishCall(turn.toolCalls);
+    if (finish) {
+      for (const id of finish.completedItems) {
+        if (!state.executorClaims.includes(id)) state.executorClaims.push(id);
+      }
+    }
+
+    // Stop only on a deterministic signal: an explicit finish, or a clean stop
+    // with no tools pending. `finish` doesn't count as pending work, so it's
+    // excluded from the tool-call count.
+    const decision = decideExecutorDone({
+      toolCallCount: turn.toolCalls.filter((t) => t.name !== FINISH_TOOL_NAME)
+        .length,
+      finishCalled: Boolean(finish),
+      stopReason: normalizeStopReason(config.provider, turn.stopReason),
+    });
+    if (decision.done) break;
+  }
+
+  return aggregate;
+}
+
+// Run a single text-provider turn: one model call, then run any tool calls it
+// emitted, appending both to the conversation. Returns this turn's results
+// (plus the raw stop reason) so the caller can decide whether to loop again.
+async function executeTextTurn(
+  state: HarnessState,
+  config: RoleModelConfig,
+  callbacks?: ExecutorCallbacks
+): Promise<ExecutorResult & { stopReason: string | undefined }> {
+  const onToken = callbacks?.onToken;
   const systemPrompt = executorSystemPrompt(state);
 
-  // Build messages from state (already includes any prior conversation)
+  // Build messages from state (already includes any prior conversation +
+  // tool results from earlier turns this pass).
   const messages: Message[] = [...state.messages];
+
+  // Capture the provider's raw stop reason so the loop can tell a natural stop
+  // from a truncation (hit token cap → not actually done).
+  let stopReason: string | undefined;
+  const chatOptions = { onFinish: (raw?: string) => { stopReason = raw; } };
 
   let response: string;
 
   if (onToken) {
     // Streaming path: collect chunks and forward each token via the callback
     const chunks: string[] = [];
-    for await (const chunk of chatStreamWithSystem(config, systemPrompt, messages)) {
+    for await (const chunk of chatStreamWithSystem(
+      config,
+      systemPrompt,
+      messages,
+      chatOptions
+    )) {
       chunks.push(chunk);
       onToken(chunk);
     }
     response = chunks.join("");
   } else {
     // Non-streaming path (fallback when no onToken provided)
-    const chatResponse = await chat(config, systemPrompt, messages);
+    const chatResponse = await chat(config, systemPrompt, messages, chatOptions);
     response = chatResponse.content;
   }
 
@@ -69,6 +177,9 @@ export async function execute(
 
   // Execute tool calls
   for (const tc of toolCalls) {
+    // `finish` is a sentinel with no side effect — the loop reads it to decide
+    // when to stop, but there's nothing to execute.
+    if (tc.name === FINISH_TOOL_NAME) continue;
     callbacks?.onToolUse?.({ name: tc.name, input: tc.arguments });
     const result = await executeTool(tc.name, tc.arguments);
     toolResults.push({
@@ -109,7 +220,7 @@ export async function execute(
     state.messages.push({ role: "tool", content: toolOutputStr });
   }
 
-  return { response, toolCalls, toolResults };
+  return { response, toolCalls, toolResults, stopReason };
 }
 
 
@@ -124,22 +235,47 @@ type ClaudeSummary = {
   evidenceFound: string[];
 };
 
-async function executeItemWithClaudeCode(
+// Run every outstanding checklist item to completion this pass, one sub-Claude
+// per item, then return. We snapshot the items up front rather than looping on
+// live status: a sub-Claude leaves its item in_progress (the VERIFIER is what
+// marks items done), so a `while (pending || in_progress)` loop would spin
+// forever on the first item. The snapshot covers both fresh runs (pending) and
+// repair passes (items the verifier left in_progress).
+async function executeAllItemsWithClaudeCode(
   state: HarnessState,
   config: RoleModelConfig,
   callbacks?: ExecutorCallbacks
 ): Promise<ExecutorResult> {
-  const onToken = callbacks?.onToken;
-  // Pick the item to work on: resume an in-progress one (a repair attempt),
-  // otherwise start the next pending item. This is the "which sub-Claude does
-  // which task" link the verifier relies on.
-  const item: PlannerChecklistItem | undefined =
-    state.checklist.find((i) => i.status === "in_progress") ??
-    state.checklist.find((i) => i.status === "pending");
+  const items = state.checklist.filter(
+    (i) => i.status === "pending" || i.status === "in_progress"
+  );
 
-  if (!item) {
-    return { response: "", toolCalls: [], toolResults: [] };
+  const aggregate: ExecutorResult = {
+    response: "",
+    toolCalls: [],
+    toolResults: [],
+  };
+
+  for (const item of items) {
+    callbacks?.onItemStart?.({ id: item.id, description: item.description });
+    const turn = await executeItemWithClaudeCode(state, config, item, callbacks);
+    aggregate.response += (aggregate.response ? "\n\n" : "") + turn.response;
+    aggregate.toolCalls.push(...turn.toolCalls);
+    aggregate.toolResults.push(...turn.toolResults);
   }
+
+  return aggregate;
+}
+
+async function executeItemWithClaudeCode(
+  state: HarnessState,
+  config: RoleModelConfig,
+  item: PlannerChecklistItem,
+  callbacks?: ExecutorCallbacks
+): Promise<ExecutorResult> {
+  const onToken = callbacks?.onToken;
+  // The caller selected this item; mark it in_progress so the verifier can link
+  // this sub-Claude's work to the right task.
   item.status = "in_progress";
 
   const prompt = claudeCodeExecutorPrompt(state, item);
@@ -197,6 +333,13 @@ async function executeItemWithClaudeCode(
     item.evidenceFound = [
       ...new Set([...item.evidenceFound, ...summary.evidenceFound]),
     ];
+  }
+
+  // The sub-Claude ran this item to completion and self-reported — record the
+  // "work was done" claim the verifier uses for manual items. We require a
+  // parsed summary so a crashed/garbled run doesn't count as a claim.
+  if (summary && !state.executorClaims.includes(item.id)) {
+    state.executorClaims.push(item.id);
   }
 
   // Keep the conversation record small: store the summary, not the full run.

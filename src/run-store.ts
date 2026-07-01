@@ -6,6 +6,7 @@ import {
   appendFile,
 } from "fs/promises";
 import { join } from "path";
+import { HarnessStateSchema } from "./schemas.js";
 import type { HarnessState, ModelConfig, VerifierReport } from "./schemas.js";
 
 const RUNS_DIR = ".runs";
@@ -159,7 +160,17 @@ export async function appendCommand(
 export async function loadState(runId: string): Promise<HarnessState> {
   const dir = join(RUNS_DIR, runId);
   const raw = await readFile(join(dir, "state.json"), "utf-8");
-  return JSON.parse(raw) as HarnessState;
+  // Parse through the schema so defaults for newer fields (e.g. executorClaims)
+  // are applied to runs saved before those fields existed. Fall back to a raw
+  // cast if an older run doesn't satisfy the current schema.
+  const json = JSON.parse(raw);
+  const parsed = HarnessStateSchema.safeParse(json);
+  if (parsed.success) return parsed.data;
+  // Schema didn't match (unusually shaped old run) — cast, but still guarantee
+  // executorClaims exists so downstream `.includes` calls don't throw.
+  const state = json as HarnessState;
+  if (!Array.isArray(state.executorClaims)) state.executorClaims = [];
+  return state;
 }
 
 export async function listRuns(): Promise<string[]> {
@@ -175,7 +186,7 @@ export type RunSummary = {
   runId: string;
   prompt: string;
   iteration: number;
-  maxIterations: number;
+  maxIterations: number | undefined;
   doneItems: number;
   totalItems: number;
   hasState: boolean;
@@ -196,7 +207,7 @@ export async function listRunsDetailed(): Promise<RunSummary[]> {
       runId,
       prompt: prompt.split("\n")[0].slice(0, 80),
       iteration: 0,
-      maxIterations: 0,
+      maxIterations: undefined,
       doneItems: 0,
       totalItems: 0,
       hasState: false,

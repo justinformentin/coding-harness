@@ -1,8 +1,8 @@
 import { plan } from "./planner.js";
-import { execute } from "./executor.js";
+import { executeToCompletion } from "./executor.js";
 import { verify } from "./verifier.js";
 import { repairPrompt } from "./prompts.js";
-import { createInitialState, getNextPendingItem } from "./state.js";
+import { createInitialState } from "./state.js";
 import {
   saveRunInit,
   saveChecklist,
@@ -28,7 +28,12 @@ export type HarnessEvent =
     }
   | { type: "plan_approved" }
   | { type: "plan_rejected" }
-  | { type: "iteration_start"; iteration: number; maxIterations: number }
+  | {
+      type: "iteration_start";
+      iteration: number;
+      // undefined = no cap (loop runs until the verifier is satisfied)
+      maxIterations: number | undefined;
+    }
   | { type: "steering"; message: string }
   | { type: "executor_start"; itemId: string; itemDescription: string }
   | { type: "executor_token"; token: string }
@@ -56,13 +61,11 @@ function toolDetail(input: unknown): string | undefined {
   return trimmed.length > 80 ? trimmed.slice(0, 80) + "…" : trimmed;
 }
 
-// Default iteration budget when the caller doesn't pin one. After planning we
-// scale up to ~3 iterations per checklist item so larger plans get room to
-// finish (each item may need an execute + a repair cycle or two).
-const DEFAULT_MAX_ITERATIONS = 25;
-const ITERATIONS_PER_ITEM = 3;
-
 export type HarnessOptions = {
+  // Hard cap on the execute/verify loop. Omitted = no limit: the loop runs
+  // until the verifier reports done. A limit is only applied when the caller
+  // explicitly sets one (--max-iterations flag, HARNESS_MAX_ITERATIONS env, or
+  // maxIterations in .harness.json).
   maxIterations?: number;
   onPlanReview?: (
     planPath: string,
@@ -99,12 +102,10 @@ export async function runHarness(
   // Support legacy numeric fourth argument for backward compatibility
   const opts: HarnessOptions =
     typeof options === "number" ? { maxIterations: options } : options ?? {};
-  // An explicit value (CLI flag / legacy arg) is a hard ceiling. When omitted,
-  // we start from a generous default and then scale to the plan size below, so
-  // a slow model working item-by-item doesn't exhaust the budget mid-task.
-  const explicitMax =
+  // The cap is honored only when the caller explicitly sets one. Otherwise it
+  // stays undefined and the loop runs until the verifier is satisfied.
+  const maxIterations =
     typeof options === "number" ? options : opts.maxIterations;
-  const maxIterations = explicitMax ?? DEFAULT_MAX_ITERATIONS;
 
   const state = createInitialState(prompt, maxIterations);
 
@@ -116,14 +117,6 @@ export async function runHarness(
     onEvent({ type: "plan_start" });
     state.checklist = await plan(prompt, config.planner);
     await saveChecklist(state);
-
-    // Scale the iteration budget to the plan size unless the caller pinned one.
-    if (explicitMax === undefined) {
-      state.maxIterations = Math.max(
-        DEFAULT_MAX_ITERATIONS,
-        state.checklist.length * ITERATIONS_PER_ITEM
-      );
-    }
 
     onEvent({ type: "plan_complete", itemCount: state.checklist.length });
 
@@ -144,8 +137,12 @@ export async function runHarness(
     // Add initial user message for executor conversation
     state.messages.push({ role: "user", content: prompt });
 
-    // Main loop
-    while (state.iteration < state.maxIterations) {
+    // Main loop. Runs until the verifier reports done, or — when a cap is set —
+    // until that many iterations have run.
+    while (
+      state.maxIterations === undefined ||
+      state.iteration < state.maxIterations
+    ) {
       state.iteration++;
       onEvent({
         type: "iteration_start",
@@ -156,24 +153,23 @@ export async function runHarness(
       // Inject any mid-run steering the user queued while we were busy
       applySteering(state, onEvent, opts.drainSteering);
 
-      // Find next item to work on
-      const nextItem = getNextPendingItem(state);
-      if (nextItem) {
-        onEvent({
-          type: "executor_start",
-          itemId: nextItem.id,
-          itemDescription: nextItem.description,
-        });
-      }
-
-      // Execute — stream tokens and tool uses to the TUI in real time
-      const result = await execute(state, config.executor, {
+      // Execute to completion — the executor runs every outstanding item / turn
+      // before returning, so the verifier below sees a finished attempt rather
+      // than firing after each small step. Per-item progress is surfaced via
+      // onItemStart. Tokens and tool uses stream to the TUI in real time.
+      const result = await executeToCompletion(state, config.executor, {
         onToken: (token) => onEvent({ type: "executor_token", token }),
         onToolUse: (use) =>
           onEvent({
             type: "executor_tool",
             name: use.name,
             detail: toolDetail(use.input),
+          }),
+        onItemStart: (item) =>
+          onEvent({
+            type: "executor_start",
+            itemId: item.id,
+            itemDescription: item.description,
           }),
       });
       onEvent({
@@ -244,10 +240,14 @@ export async function resumeHarness(
   state: HarnessState,
   config: ModelConfig,
   onEvent: EventCallback,
-  options?: Pick<HarnessOptions, "drainSteering">
+  options?: Pick<HarnessOptions, "drainSteering" | "maxIterations">
 ): Promise<HarnessState> {
-  // Reset iteration counter to allow more attempts
+  // Reset iteration counter to allow more attempts.
   state.iteration = 0;
+  // Re-derive the cap from current explicit sources rather than trusting the
+  // (possibly stale) value saved with the run. With no explicit cap this is
+  // undefined, so the resumed run is unbounded too.
+  state.maxIterations = options?.maxIterations;
   return runHarnessLoop(state, config, onEvent, options);
 }
 
@@ -255,9 +255,12 @@ async function runHarnessLoop(
   state: HarnessState,
   config: ModelConfig,
   onEvent: EventCallback,
-  options?: Pick<HarnessOptions, "drainSteering">
+  options?: Pick<HarnessOptions, "drainSteering" | "maxIterations">
 ): Promise<HarnessState> {
-  while (state.iteration < state.maxIterations) {
+  while (
+    state.maxIterations === undefined ||
+    state.iteration < state.maxIterations
+  ) {
     state.iteration++;
     onEvent({
       type: "iteration_start",
@@ -268,22 +271,20 @@ async function runHarnessLoop(
     // Inject any mid-run steering the user queued while we were busy
     applySteering(state, onEvent, options?.drainSteering);
 
-    const nextItem = getNextPendingItem(state);
-    if (nextItem) {
-      onEvent({
-        type: "executor_start",
-        itemId: nextItem.id,
-        itemDescription: nextItem.description,
-      });
-    }
-
-    const result = await execute(state, config.executor, {
+    // Execute to completion before verifying (see runHarness for rationale).
+    const result = await executeToCompletion(state, config.executor, {
       onToken: (token) => onEvent({ type: "executor_token", token }),
       onToolUse: (use) =>
         onEvent({
           type: "executor_tool",
           name: use.name,
           detail: toolDetail(use.input),
+        }),
+      onItemStart: (item) =>
+        onEvent({
+          type: "executor_start",
+          itemId: item.id,
+          itemDescription: item.description,
         }),
     });
     onEvent({

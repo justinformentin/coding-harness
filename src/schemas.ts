@@ -38,8 +38,26 @@ export const VerifierConfigSchema = z.object({
 
 export type VerifierConfig = z.infer<typeof VerifierConfigSchema>;
 
+// How an item should be verified once the executor has attempted it:
+//   - "deterministic": checked purely in code via verifierConfig (file exists,
+//     command ran, pattern present). No LLM involved.
+//   - "manual": success is subjective and can't be checked mechanically; we
+//     only confirm the work was attempted (the executor's finish claim) and
+//     defer any content judgment to a later human review.
+//   - "llm": genuinely needs semantic judgment now; verified per-item by the
+//     verifier model. Reserve for cases the other two can't cover.
+export const VerificationKindSchema = z.enum([
+  "deterministic",
+  "manual",
+  "llm",
+]);
+export type VerificationKind = z.infer<typeof VerificationKindSchema>;
+
 export const PlannerChecklistItemSchema = ChecklistItemSchema.extend({
   verifierConfig: VerifierConfigSchema.optional(),
+  // Chosen by the planner. When omitted, the verifier infers it: deterministic
+  // if a non-empty verifierConfig is present, otherwise manual.
+  verificationKind: VerificationKindSchema.optional(),
   suggestedCommands: z.array(z.string()).optional(),
   dependencies: z.array(z.string()).optional(),
 });
@@ -108,6 +126,10 @@ export const ModelConfigSchema = z.object({
   planner: RoleModelConfigSchema,
   executor: RoleModelConfigSchema,
   verifier: RoleModelConfigSchema,
+  // Optional hard cap on the execute/verify loop. Omitted = no limit (the
+  // loop runs until the verifier reports done). Can also be set via the
+  // HARNESS_MAX_ITERATIONS env var or the --max-iterations CLI flag.
+  maxIterations: z.number().int().positive().optional(),
 });
 
 export type ModelConfig = z.infer<typeof ModelConfigSchema>;
@@ -146,6 +168,10 @@ export type ChatOptions = {
     enabled: boolean;
     budgetTokens?: number;
   };
+  // Called once when the stream ends, with the provider's RAW stop reason
+  // (OpenAI/local `finish_reason`, Anthropic `stop_reason`). undefined when the
+  // provider didn't report one. Normalize via completion.normalizeStopReason.
+  onFinish?: (rawStopReason: string | undefined) => void;
 };
 
 export const ArtifactsSchema = z.object({
@@ -162,8 +188,15 @@ export const HarnessStateSchema = z.object({
   messages: z.array(MessageSchema),
   artifacts: ArtifactsSchema,
   verifierReport: VerifierReportSchema.optional(),
+  // Checklist item ids the executor has explicitly declared complete (via the
+  // `finish` tool on text providers, or a finished sub-Claude on claude-code).
+  // This is the "work was done" signal the verifier uses for manual items.
+  // Defaulted for backward compatibility with runs saved before this existed.
+  executorClaims: z.array(z.string()).default([]),
   iteration: z.number(),
-  maxIterations: z.number(),
+  // Hard cap on iterations, or undefined for no limit. Older runs persisted a
+  // number; new runs may omit it entirely.
+  maxIterations: z.number().optional(),
   runId: z.string(),
   startedAt: z.number(),
 });

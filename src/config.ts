@@ -76,6 +76,13 @@ export async function loadConfig(): Promise<ModelConfig> {
   if (process.env.HARNESS_VERIFIER_BASE_URL)
     config.verifier.baseUrl = process.env.HARNESS_VERIFIER_BASE_URL;
 
+  // Iteration cap from env (overrides .harness.json). A non-positive or
+  // unparseable value is ignored, leaving the loop unbounded.
+  if (process.env.HARNESS_MAX_ITERATIONS) {
+    const v = Number(process.env.HARNESS_MAX_ITERATIONS);
+    if (Number.isFinite(v) && v > 0) config.maxIterations = Math.floor(v);
+  }
+
   // API keys from env
   if (process.env.OPENAI_API_KEY && config.planner.provider === "openai") {
     config.planner.apiKey = process.env.OPENAI_API_KEY;

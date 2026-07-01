@@ -236,6 +236,9 @@ async function* chatStreamOpenAI(
   // OpenAI SSE format:
   //   data: {"choices":[{"delta":{"content":"token"}}]}
   //   data: [DONE]
+  // The last non-empty chunk carries finish_reason ("stop" | "length" |
+  // "tool_calls" | ...); we remember it and report it via onFinish at the end.
+  let finishReason: string | undefined;
   for await (const line of parseSSE(response)) {
     if (line === "[DONE]") break;
     if (!line.trim()) continue;
@@ -255,7 +258,9 @@ async function* chatStreamOpenAI(
         }>;
       };
 
-      const delta = parsed.choices?.[0]?.delta;
+      const choice = parsed.choices?.[0];
+      if (choice?.finish_reason) finishReason = choice.finish_reason;
+      const delta = choice?.delta;
       if (delta?.content) {
         yield delta.content;
       }
@@ -266,6 +271,7 @@ async function* chatStreamOpenAI(
       // Ignore malformed SSE lines
     }
   }
+  options.onFinish?.(finishReason);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -368,6 +374,9 @@ async function* chatStreamAnthropic(
   let currentEvent = "";
   // Track whether current content block is a thinking block (to suppress output)
   let currentBlockIsThinking = false;
+  // Anthropic reports stop_reason on the message_delta event, near the end of
+  // the stream. We capture it and report it via onFinish on message_stop.
+  let stopReason: string | undefined;
 
   try {
     while (true) {
@@ -384,7 +393,19 @@ async function* chatStreamAnthropic(
         } else if (line.startsWith("data: ")) {
           const data = line.slice(6);
 
-          if (currentEvent === "content_block_start") {
+          if (currentEvent === "message_delta") {
+            // Carries the final stop_reason for the message.
+            try {
+              const parsed = JSON.parse(data) as {
+                delta?: { stop_reason?: string };
+              };
+              if (parsed.delta?.stop_reason) {
+                stopReason = parsed.delta.stop_reason;
+              }
+            } catch {
+              // Ignore malformed JSON
+            }
+          } else if (currentEvent === "content_block_start") {
             // Identify the block type so we know whether to suppress deltas
             try {
               const parsed = JSON.parse(data) as {
@@ -416,11 +437,14 @@ async function* chatStreamAnthropic(
               // Ignore malformed JSON
             }
           } else if (currentEvent === "message_stop") {
+            options.onFinish?.(stopReason);
             return;
           }
         }
       }
     }
+    // Stream ended without an explicit message_stop event.
+    options.onFinish?.(stopReason);
   } finally {
     reader.releaseLock();
   }
@@ -471,6 +495,10 @@ async function* chatStreamClaudeCode(
     signal: options.signal,
   });
   if (result.text) yield result.text;
+  // The subprocess only returns once its own agent loop has finished, so a
+  // return is always a clean stop. (normalizeStopReason ignores the raw value
+  // for claude-code, but we report one for symmetry.)
+  options.onFinish?.("end_turn");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
