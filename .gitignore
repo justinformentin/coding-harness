@@ -2,3 +2,4 @@ node_modules
 dist
 .runs
 .env
+harness-debug.log
