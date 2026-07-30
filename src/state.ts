@@ -13,6 +13,7 @@ export function createInitialState(
     messages: [],
     artifacts: { filesChanged: [], commandsRun: [], commandOutputs: [] },
     executorClaims: [],
+    claudeSessions: {},
     iteration: 0,
     maxIterations,
     runId: `${date}-${seq}`,

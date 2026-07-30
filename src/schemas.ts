@@ -116,6 +116,16 @@ export const RoleModelConfigSchema = z.object({
       allowedTools: z.array(z.string()).optional(),
       disallowedTools: z.array(z.string()).optional(),
       dangerouslySkipPermissions: z.boolean().optional(),
+      // By default each spawned sub-`claude` is isolated from the user's global
+      // config: no inherited MCP servers (--strict-mcp-config) and only
+      // project/local settings (skips user-level SessionStart hooks). This
+      // avoids slow/hanging startup when the user has many MCP servers or
+      // auth-gated connectors configured. Set to false to inherit everything.
+      isolateConfig: z.boolean().optional(),
+      // Which setting sources the sub-`claude` loads. Defaults to
+      // ["project","local"] when isolateConfig !== false. Set explicitly to
+      // include "user" if a role genuinely needs user-level settings/hooks.
+      settingSources: z.array(z.enum(["user", "project", "local"])).optional(),
     })
     .optional(),
 });
@@ -172,6 +182,13 @@ export type ChatOptions = {
   // (OpenAI/local `finish_reason`, Anthropic `stop_reason`). undefined when the
   // provider didn't report one. Normalize via completion.normalizeStopReason.
   onFinish?: (rawStopReason: string | undefined) => void;
+  // Live progress callbacks for the claude-code provider, whose subprocess only
+  // yields its final text at the very end. Without these, callers that use the
+  // non-streaming chat() (planner, verifier) see nothing until the run finishes.
+  // Fires for each chunk of assistant-visible text as it streams.
+  onToken?: (token: string) => void;
+  // Fires for each tool the model invokes.
+  onToolUse?: (use: { name: string; input: unknown }) => void;
 };
 
 export const ArtifactsSchema = z.object({
@@ -193,6 +210,11 @@ export const HarnessStateSchema = z.object({
   // This is the "work was done" signal the verifier uses for manual items.
   // Defaulted for backward compatibility with runs saved before this existed.
   executorClaims: z.array(z.string()).default([]),
+  // Maps checklist item id → the claude-code session id of the sub-Claude that
+  // last worked it. Lets a resumed run continue an interrupted item's own
+  // session (`claude --resume`) instead of cold-starting a fresh one. Defaulted
+  // for backward compatibility with runs saved before this existed.
+  claudeSessions: z.record(z.string()).default({}),
   iteration: z.number(),
   // Hard cap on iterations, or undefined for no limit. Older runs persisted a
   // number; new runs may omit it entirely.

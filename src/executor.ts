@@ -8,6 +8,7 @@ import {
   decideExecutorDone,
 } from "./completion.js";
 import { runClaudeCode, gitChangedFiles } from "./claude-code.js";
+import { debug } from "./debug.js";
 import type {
   HarnessState,
   Message,
@@ -38,6 +39,12 @@ export type ExecutorCallbacks = {
    * several items / turns.
    */
   onItemStart?: (item: { id: string; description: string }) => void;
+  /**
+   * Aborts in-flight model calls / sub-Claude subprocesses when the run is
+   * stopped. runClaudeCode kills its child on abort; the text providers cancel
+   * their fetch. Threaded through every provider path below.
+   */
+  signal?: AbortSignal;
 };
 
 // Safety cap on how many model turns one execute-to-completion pass may take on
@@ -65,6 +72,11 @@ export async function executeToCompletion(
   config: RoleModelConfig,
   callbacks?: ExecutorCallbacks
 ): Promise<ExecutorResult> {
+  debug("executor", "executeToCompletion", {
+    provider: config.provider,
+    pending: state.checklist.filter((i) => i.status === "pending").length,
+    inProgress: state.checklist.filter((i) => i.status === "in_progress").length,
+  });
   // Provider-specific: claude-code spawns one fresh sub-Claude per item.
   if (config.provider === "claude-code") {
     return executeAllItemsWithClaudeCode(state, config, callbacks);
@@ -101,7 +113,12 @@ async function executeTextToCompletion(
   };
 
   for (let step = 0; step < MAX_EXECUTOR_STEPS; step++) {
+    debug("executor", `text turn ${step} start`);
     const turn = await executeTextTurn(state, config, callbacks);
+    debug("executor", `text turn ${step} done`, {
+      toolCalls: turn.toolCalls.length,
+      stopReason: turn.stopReason,
+    });
     aggregate.response += (aggregate.response ? "\n" : "") + turn.response;
     aggregate.toolCalls.push(...turn.toolCalls);
     aggregate.toolResults.push(...turn.toolResults);
@@ -148,7 +165,10 @@ async function executeTextTurn(
   // Capture the provider's raw stop reason so the loop can tell a natural stop
   // from a truncation (hit token cap → not actually done).
   let stopReason: string | undefined;
-  const chatOptions = { onFinish: (raw?: string) => { stopReason = raw; } };
+  const chatOptions = {
+    onFinish: (raw?: string) => { stopReason = raw; },
+    signal: callbacks?.signal,
+  };
 
   let response: string;
 
@@ -256,9 +276,19 @@ async function executeAllItemsWithClaudeCode(
     toolResults: [],
   };
 
+  debug("executor", "claude-code: executing items", {
+    itemCount: items.length,
+    itemIds: items.map((i) => i.id),
+  });
   for (const item of items) {
+    debug("executor", `claude-code: item ${item.id} start`, {
+      description: item.description,
+    });
     callbacks?.onItemStart?.({ id: item.id, description: item.description });
     const turn = await executeItemWithClaudeCode(state, config, item, callbacks);
+    debug("executor", `claude-code: item ${item.id} done`, {
+      toolCalls: turn.toolCalls.length,
+    });
     aggregate.response += (aggregate.response ? "\n\n" : "") + turn.response;
     aggregate.toolCalls.push(...turn.toolCalls);
     aggregate.toolResults.push(...turn.toolResults);
@@ -282,6 +312,13 @@ async function executeItemWithClaudeCode(
   const before = new Set(gitChangedFiles());
   const toolCalls: ParsedToolCall[] = [];
 
+  // If a prior sub-Claude already worked this item (a repair pass, or a resumed
+  // run after the harness was interrupted mid-item), continue its own session
+  // instead of cold-starting — the sub-Claude keeps the context of what it had
+  // already done.
+  const sessions = (state.claudeSessions ??= {});
+  const resumeSessionId = sessions[item.id];
+
   const result = await runClaudeCode({
     prompt,
     model: config.model,
@@ -290,6 +327,10 @@ async function executeItemWithClaudeCode(
     // The executor must edit files and run commands unattended.
     dangerouslySkipPermissions:
       config.claudeCode?.dangerouslySkipPermissions ?? true,
+    isolateConfig: config.claudeCode?.isolateConfig,
+    settingSources: config.claudeCode?.settingSources,
+    resumeSessionId,
+    signal: callbacks?.signal,
     onToken,
     onToolUse: (use) => {
       toolCalls.push({
@@ -299,6 +340,9 @@ async function executeItemWithClaudeCode(
       callbacks?.onToolUse?.({ name: use.name, input: use.input });
     },
   });
+
+  // Remember this item's session so a later repair/resume pass can continue it.
+  if (result.sessionId) sessions[item.id] = result.sessionId;
 
   const summary = parseClaudeSummary(result.text);
 

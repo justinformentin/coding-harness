@@ -8,6 +8,7 @@ import {
   type VerifierReport,
   type RoleModelConfig,
 } from "./schemas.js";
+import { debug } from "./debug.js";
 
 /**
  * Verification, restructured to be deterministic-first and LLM-rare.
@@ -29,7 +30,8 @@ import {
  */
 export async function verify(
   state: HarnessState,
-  config: RoleModelConfig
+  config: RoleModelConfig,
+  signal?: AbortSignal
 ): Promise<VerifierReport> {
   const completed: string[] = [];
   const incomplete: string[] = [];
@@ -37,6 +39,8 @@ export async function verify(
   // Items needing semantic judgment are collected and judged after the cheap
   // checks, so we only spin up the model when something actually requires it.
   const llmItems: PlannerChecklistItem[] = [];
+
+  debug("verifier", "verify start", { itemCount: state.checklist.length });
 
   for (const item of state.checklist) {
     if (item.status === "done") {
@@ -74,8 +78,17 @@ export async function verify(
   }
 
   // Only now — and only if some item truly needs it — call the model.
+  debug("verifier", "cheap checks done", {
+    completed: completed.length,
+    incomplete: incomplete.length,
+    llmItems: llmItems.length,
+  });
   for (const item of llmItems) {
-    const verdict = await judgeItemWithLLM(item, state, config);
+    debug("verifier", `LLM judge for item ${item.id} — start`);
+    const verdict = await judgeItemWithLLM(item, state, config, signal);
+    debug("verifier", `LLM judge for item ${item.id} — done`, {
+      complete: verdict.complete,
+    });
     if (verdict.complete) {
       completed.push(item.id);
     } else {
@@ -213,7 +226,8 @@ function checkDeterministic(
 async function judgeItemWithLLM(
   item: PlannerChecklistItem,
   state: HarnessState,
-  config: RoleModelConfig
+  config: RoleModelConfig,
+  signal?: AbortSignal
 ): Promise<{ complete: boolean; missing: string[] }> {
   const payload = {
     item: {
@@ -232,9 +246,12 @@ async function judgeItemWithLLM(
     },
   };
 
-  const { content } = await chat(config, verifierSystemPrompt(), [
-    { role: "user", content: JSON.stringify(payload) },
-  ]);
+  const { content } = await chat(
+    config,
+    verifierSystemPrompt(),
+    [{ role: "user", content: JSON.stringify(payload) }],
+    { signal }
+  );
 
   const jsonStr = content.match(/\{[\s\S]*\}/)?.[0] ?? content;
   try {

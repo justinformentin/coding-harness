@@ -4,6 +4,7 @@ import { render } from "ink";
 import { App } from "./ui/App.js";
 import { loadConfig, printConfig, applyClaudeCodeOverride } from "./config.js";
 import { listRuns } from "./run-store.js";
+import { announceDebug, debug } from "./debug.js";
 
 // Read an explicit iteration cap from --max-iterations / --iterations, if any.
 // Returns undefined when the flag is absent or its value isn't a positive
@@ -19,6 +20,8 @@ function parseMaxIterationsFlag(args: string[]): number | undefined {
 
 async function main() {
   const args = process.argv.slice(2);
+  announceDebug();
+  debug("cli", "main() started", { args });
 
   // Handle flags
   if (args.includes("--web")) {

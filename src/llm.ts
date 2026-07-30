@@ -12,6 +12,7 @@ import type {
 } from "./schemas.js";
 import { ModelConfigSchema } from "./schemas.js";
 import { runClaudeCode } from "./claude-code.js";
+import { debug } from "./debug.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal message types
@@ -189,6 +190,11 @@ async function* chatStreamOpenAI(
     ? combineSignals(options.signal, controller.signal)
     : controller.signal;
 
+  debug("llm", "openai-compatible fetch → start", {
+    provider: config.provider,
+    model: config.model,
+    url: `${baseUrl}/chat/completions`,
+  });
   let response: Response;
   try {
     response = await fetch(`${baseUrl}/chat/completions`, {
@@ -196,6 +202,10 @@ async function* chatStreamOpenAI(
       headers,
       body: JSON.stringify(body),
       signal,
+    });
+    debug("llm", "openai-compatible fetch → response headers received", {
+      status: response.status,
+      ok: response.ok,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -271,6 +281,7 @@ async function* chatStreamOpenAI(
       // Ignore malformed SSE lines
     }
   }
+  debug("llm", "openai-compatible stream → ended", { finishReason });
   options.onFinish?.(finishReason);
 }
 
@@ -339,6 +350,12 @@ async function* chatStreamAnthropic(
     }));
   }
 
+  debug("llm", "anthropic fetch → start", {
+    model: config.model,
+    url: `${baseUrl}/v1/messages`,
+    thinkingEnabled,
+    maxTokens,
+  });
   const response = await fetch(`${baseUrl}/v1/messages`, {
     method: "POST",
     headers: {
@@ -348,6 +365,10 @@ async function* chatStreamAnthropic(
     },
     body: JSON.stringify(body),
     signal: options.signal,
+  });
+  debug("llm", "anthropic fetch → response headers received", {
+    status: response.status,
+    ok: response.ok,
   });
 
   if (!response.ok) {
@@ -437,6 +458,7 @@ async function* chatStreamAnthropic(
               // Ignore malformed JSON
             }
           } else if (currentEvent === "message_stop") {
+            debug("llm", "anthropic stream → message_stop", { stopReason });
             options.onFinish?.(stopReason);
             return;
           }
@@ -444,6 +466,7 @@ async function* chatStreamAnthropic(
       }
     }
     // Stream ended without an explicit message_stop event.
+    debug("llm", "anthropic stream → ended without message_stop", { stopReason });
     options.onFinish?.(stopReason);
   } finally {
     reader.releaseLock();
@@ -477,6 +500,10 @@ async function* chatStreamClaudeCode(
   options: ChatOptions = {}
 ): AsyncGenerator<string> {
   const prompt = flattenForClaudeCode(messages);
+  debug("llm", "claude-code subprocess → invoking runClaudeCode", {
+    model: config.model,
+    promptLen: prompt.length,
+  });
   const result = await runClaudeCode({
     prompt,
     systemPrompt: systemPrompt || undefined,
@@ -492,7 +519,19 @@ async function* chatStreamClaudeCode(
       ],
     dangerouslySkipPermissions:
       config.claudeCode?.dangerouslySkipPermissions ?? true,
+    isolateConfig: config.claudeCode?.isolateConfig,
+    settingSources: config.claudeCode?.settingSources,
     signal: options.signal,
+    // Forward live progress so non-streaming callers (planner/verifier) can
+    // surface the sub-Claude's tokens and tool uses in real time instead of
+    // going silent until the whole run finishes.
+    onToken: options.onToken,
+    onToolUse: options.onToolUse,
+  });
+  debug("llm", "claude-code subprocess → returned", {
+    textLen: result.text.length,
+    numTurns: result.numTurns,
+    toolUses: result.toolUses.length,
   });
   if (result.text) yield result.text;
   // The subprocess only returns once its own agent loop has finished, so a

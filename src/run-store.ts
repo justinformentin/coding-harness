@@ -8,6 +8,7 @@ import {
 import { join } from "path";
 import { HarnessStateSchema } from "./schemas.js";
 import type { HarnessState, ModelConfig, VerifierReport } from "./schemas.js";
+import type { HarnessEvent } from "./harness.js";
 
 const RUNS_DIR = ".runs";
 
@@ -157,6 +158,54 @@ export async function appendCommand(
   await appendFile(join(dir, "commands.jsonl"), line + "\n", "utf-8");
 }
 
+// Durable transcript of every harness event, in order. This is the persistent
+// record of what the TUI showed — assistant text, tool calls, tool results,
+// verifier reports — so a resumed run can rebuild the full log rather than
+// starting with a blank screen. Appends are serialized through a single promise
+// chain so concurrent emits can't interleave a half-written line.
+let eventAppendChain: Promise<void> = Promise.resolve();
+
+export function appendEvent(
+  runId: string,
+  event: HarnessEvent
+): Promise<void> {
+  eventAppendChain = eventAppendChain
+    .then(() =>
+      appendFile(
+        join(RUNS_DIR, runId, "events.jsonl"),
+        JSON.stringify({ timestamp: Date.now(), event }) + "\n",
+        "utf-8"
+      )
+    )
+    .catch(() => {
+      // Best-effort: a failed transcript append must never break the run.
+    });
+  return eventAppendChain;
+}
+
+export async function loadEvents(runId: string): Promise<HarnessEvent[]> {
+  try {
+    const raw = await readFile(
+      join(RUNS_DIR, runId, "events.jsonl"),
+      "utf-8"
+    );
+    const events: HarnessEvent[] = [];
+    for (const line of raw.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const parsed = JSON.parse(trimmed) as { event?: HarnessEvent };
+        if (parsed.event) events.push(parsed.event);
+      } catch {
+        // Skip a malformed / partially-written line.
+      }
+    }
+    return events;
+  } catch {
+    return [];
+  }
+}
+
 export async function loadState(runId: string): Promise<HarnessState> {
   const dir = join(RUNS_DIR, runId);
   const raw = await readFile(join(dir, "state.json"), "utf-8");
@@ -170,6 +219,8 @@ export async function loadState(runId: string): Promise<HarnessState> {
   // executorClaims exists so downstream `.includes` calls don't throw.
   const state = json as HarnessState;
   if (!Array.isArray(state.executorClaims)) state.executorClaims = [];
+  if (!state.claudeSessions || typeof state.claudeSessions !== "object")
+    state.claudeSessions = {};
   return state;
 }
 

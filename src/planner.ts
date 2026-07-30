@@ -1,6 +1,7 @@
 import { chat } from "./llm.js";
 import { plannerSystemPrompt } from "./prompts.js";
 import { executeTool } from "./tools.js";
+import { debug, time } from "./debug.js";
 import {
   PlannerOutputSchema,
   type PlannerChecklistItem,
@@ -22,14 +23,29 @@ const MAX_EXPLORE_TURNS = 12;
 // directory listing can't blow up the planner's context.
 const MAX_TOOL_OUTPUT = 4000;
 
+export type PlannerCallbacks = {
+  /** Fires for each chunk of assistant-visible text the planner streams. */
+  onToken?: (token: string) => void;
+  /** Fires in real time each time the planner invokes a tool. */
+  onToolUse?: (use: { name: string; input: unknown }) => void;
+  /** Aborts the planner's model call (and any sub-Claude) when the run is stopped. */
+  signal?: AbortSignal;
+};
+
 export async function plan(
   prompt: string,
-  config: RoleModelConfig
+  config: RoleModelConfig,
+  callbacks?: PlannerCallbacks
 ): Promise<PlannerChecklistItem[]> {
   // Claude Code uses its own native tools; every other provider explores via
   // freeform ```tool blocks that we execute here.
   const freeformTools = config.provider !== "claude-code";
   const systemPrompt = plannerSystemPrompt({ freeformTools });
+  debug("planner", "plan() started", {
+    provider: config.provider,
+    model: config.model,
+    freeformTools,
+  });
 
   const messages: Message[] = [{ role: "user", content: prompt }];
   let lastError = "";
@@ -39,7 +55,23 @@ export async function plan(
   // Bound total round-trips: exploration turns plus a few attempts to coerce
   // valid JSON once exploration is done.
   for (let turn = 0; turn < MAX_EXPLORE_TURNS + MAX_PLAN_ATTEMPTS; turn++) {
-    const { content, toolCalls } = await chat(config, systemPrompt, messages);
+    debug("planner", `turn ${turn}: calling chat()`, {
+      messageCount: messages.length,
+    });
+    const { content, toolCalls } = await time(
+      "planner",
+      `turn ${turn} chat()`,
+      () =>
+        chat(config, systemPrompt, messages, {
+          onToken: callbacks?.onToken,
+          onToolUse: callbacks?.onToolUse,
+          signal: callbacks?.signal,
+        })
+    );
+    debug("planner", `turn ${turn}: chat() returned`, {
+      contentLen: content.length,
+      toolCalls: toolCalls?.length ?? 0,
+    });
 
     // Exploration: if the model issued tool calls (and it still has budget),
     // run them read-only and feed the results back for another turn.
@@ -82,7 +114,9 @@ export async function plan(
           );
           continue;
         }
-        const result = await executeTool(tc.tool_name, tc.arguments);
+        const result = await time("planner", `tool ${tc.tool_name}`, () =>
+          executeTool(tc.tool_name, tc.arguments)
+        );
         const output =
           result.output.length > MAX_TOOL_OUTPUT
             ? result.output.slice(0, MAX_TOOL_OUTPUT) + "\n…(truncated)"
@@ -96,6 +130,9 @@ export async function plan(
     // No (more) tool calls — treat this as the final plan.
     const parsed = parsePlannerOutput(content);
     if (parsed.ok) {
+      debug("planner", "produced valid plan", {
+        itemCount: parsed.value.checklist.length,
+      });
       // Ensure all items start as pending with empty evidenceFound
       return parsed.value.checklist.map((item) => ({
         ...item,
@@ -106,6 +143,9 @@ export async function plan(
 
     lastError = parsed.error;
     parseAttempts++;
+    debug("planner", `parse failed (attempt ${parseAttempts})`, {
+      error: parsed.error,
+    });
     if (parseAttempts >= MAX_PLAN_ATTEMPTS) break;
 
     // Feed the bad response back and ask the model to correct itself.
