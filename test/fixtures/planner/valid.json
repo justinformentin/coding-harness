@@ -1,0 +1,15 @@
+{
+  "goal": "Create a greeting",
+  "checklist": [
+    {
+      "id": "write-greeting",
+      "description": "Write the greeting file",
+      "status": "pending",
+      "acceptanceCriteria": ["greeting.txt exists"],
+      "evidenceRequired": ["file contents"],
+      "evidenceFound": [],
+      "verificationKind": "deterministic",
+      "verifierConfig": { "requiredFiles": ["greeting.txt"] }
+    }
+  ]
+}

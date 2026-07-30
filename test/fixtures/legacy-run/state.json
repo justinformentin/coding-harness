@@ -1,0 +1,10 @@
+{
+  "originalPrompt": "Create a greeting file.",
+  "checklist": [],
+  "messages": [],
+  "artifacts": { "filesChanged": [], "commandsRun": [], "commandOutputs": [] },
+  "iteration": 1,
+  "maxIterations": 2,
+  "runId": "legacy-fixture",
+  "startedAt": 1700000000000
+}
