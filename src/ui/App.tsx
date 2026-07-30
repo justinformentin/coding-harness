@@ -7,7 +7,12 @@ import { Input } from "./Input.js";
 import { PlanReview } from "./PlanReview.js";
 import { RunPicker } from "./RunPicker.js";
 import { runHarness, resumeHarness, type HarnessEvent } from "../harness.js";
-import { listRunsDetailed, loadState, type RunSummary } from "../run-store.js";
+import {
+  listRunsDetailed,
+  loadState,
+  loadEvents,
+  type RunSummary,
+} from "../run-store.js";
 import type { ModelConfig, PlannerChecklistItem } from "../schemas.js";
 
 type AppProps = {
@@ -81,11 +86,82 @@ export function App({
   const handleEvent = useCallback(
     (event: HarnessEvent) => {
       switch (event.type) {
+        case "run_init":
+          break;
         case "plan_start":
           setStatus("planning");
           addLog("system", "Creating checklist from prompt...");
+          // Open a streaming placeholder the planner's tokens append into.
+          setLogs((prev) => [
+            ...prev,
+            { source: "planner" as const, message: "", streaming: true },
+          ]);
+          break;
+        case "plan_token":
+          // Append to the open planner streaming entry, or open a fresh one
+          // (e.g. text resuming right after a tool call).
+          setLogs((prev) => {
+            const updated = [...prev];
+            const lastIdx = updated.length - 1;
+            if (lastIdx >= 0 && updated[lastIdx].streaming) {
+              updated[lastIdx] = {
+                ...updated[lastIdx],
+                message: (updated[lastIdx].message + event.token).slice(-200),
+              };
+              return updated;
+            }
+            return [
+              ...prev,
+              {
+                source: "planner" as const,
+                message: event.token.slice(-200),
+                streaming: true,
+              },
+            ];
+          });
+          break;
+        case "plan_tool":
+          // Finalize the current streamed text, append the tool entry after it,
+          // then open a fresh placeholder for text that follows — preserving
+          // chronological order (text → tool → text).
+          setLogs((prev) => {
+            const updated = [...prev];
+            const lastIdx = updated.length - 1;
+            if (lastIdx >= 0 && updated[lastIdx].streaming) {
+              if (updated[lastIdx].message === "") {
+                updated.splice(lastIdx, 1);
+              } else {
+                updated[lastIdx] = { ...updated[lastIdx], streaming: false };
+              }
+            }
+            updated.push({
+              source: "tool",
+              message: event.detail
+                ? `${event.name} — ${event.detail}`
+                : event.name,
+            });
+            updated.push({
+              source: "planner" as const,
+              message: "",
+              streaming: true,
+            });
+            return updated;
+          });
           break;
         case "plan_complete":
+          // Close any trailing planner streaming entry before logging the count.
+          setLogs((prev) => {
+            const updated = [...prev];
+            const lastIdx = updated.length - 1;
+            if (lastIdx >= 0 && updated[lastIdx].streaming) {
+              if (updated[lastIdx].message === "") {
+                updated.splice(lastIdx, 1);
+              } else {
+                updated[lastIdx] = { ...updated[lastIdx], streaming: false };
+              }
+            }
+            return updated;
+          });
           addLog("planner", `Created ${event.itemCount} checklist items`);
           break;
         case "plan_review":
@@ -363,6 +439,25 @@ export function App({
         // Display the cap that will actually apply (flag/config), not the
         // possibly-stale value saved with the run.
         setMaxIter(maxIterations);
+
+        // Rebuild the transcript from the durable event log so resume doesn't
+        // start with a blank screen. Skip events that would block (plan_review)
+        // or that set a terminal status (complete/error/max_iterations) — the
+        // resumed loop drives status from here on.
+        const priorEvents = await loadEvents(runId);
+        if (priorEvents.length > 0) {
+          const REPLAY_SKIP = new Set([
+            "plan_review",
+            "complete",
+            "max_iterations",
+            "error",
+          ]);
+          for (const ev of priorEvents) {
+            if (!REPLAY_SKIP.has(ev.type)) handleEvent(ev);
+          }
+          addLog("system", `— replayed ${priorEvents.length} prior events —`);
+        }
+
         addLog(
           "system",
           `Loaded ${state.checklist.length} checklist items — continuing execution`,
