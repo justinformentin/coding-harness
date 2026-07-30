@@ -1,0 +1,2 @@
+{"timestamp":1700000000000,"event":{"type":"run_init","runId":"legacy-fixture"}}
+{"timestamp":1700000001000,"event":{"type":"iteration_start","iteration":1,"maxIterations":2}}

@@ -172,7 +172,7 @@ type ParseResult =
   | { ok: true; value: { goal: string; checklist: PlannerChecklistItem[] } }
   | { ok: false; error: string };
 
-function parsePlannerOutput(content: string): ParseResult {
+export function parsePlannerOutput(content: string): ParseResult {
   const jsonStr = extractJSON(content);
 
   let parsed: unknown;

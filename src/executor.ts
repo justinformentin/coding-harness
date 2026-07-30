@@ -436,7 +436,7 @@ function parseClaudeSummary(text: string): ClaudeSummary | null {
   }
 }
 
-function parseToolCalls(response: string): ParsedToolCall[] {
+export function parseToolCalls(response: string): ParsedToolCall[] {
   const calls: ParsedToolCall[] = [];
   const toolBlockRegex = /```tool\s*\n?([\s\S]*?)\n?```/g;
   let match;

@@ -1,8 +1,34 @@
 # Harness modernization plan
 
-**Status:** proposed  
+**Status:** in progress
 **Scope:** architecture and delivery plan; this document does not authorize a
 big-bang rewrite.
+
+## Implementation checklist
+
+This checklist tracks the delivery plan below. Checked items are implemented
+and covered by the repository's automated test suite; unchecked items remain
+future work.
+
+### Phase 0 — Characterize current behavior
+
+- [x] Add a Bun test runner.
+- [x] Add fixtures and characterization tests for configuration precedence,
+  plan parsing, free-form tool-call parsing, deterministic verification, and
+  event persistence.
+- [ ] Add harness-level cancellation and resume characterization tests.
+- [ ] Add fake-provider end-to-end scenarios for success,
+  repair-then-success, and budget exhaustion.
+- [x] Capture the legacy run layout as a checked-in fixture.
+- [ ] Meet the Phase 0 exit gate with all fake-provider scenarios passing.
+
+### Remaining phases
+
+- [ ] Phase 1 — contracts and configuration.
+- [ ] Phase 2 — run store and trace protocol.
+- [ ] Phase 3 — deterministic step loop.
+- [ ] Phase 4 — model and context reliability.
+- [ ] Phase 5 — evaluation and extension seams.
 
 ## 1. Goal and constraints
 
