@@ -2,7 +2,7 @@ import type { HarnessState, PlannerChecklistItem } from "./schemas.js";
 
 export function createInitialState(
   prompt: string,
-  maxIterations: number = 10
+  maxIterations?: number
 ): HarnessState {
   const now = Date.now();
   const date = new Date(now).toISOString().split("T")[0];
@@ -12,6 +12,8 @@ export function createInitialState(
     checklist: [],
     messages: [],
     artifacts: { filesChanged: [], commandsRun: [], commandOutputs: [] },
+    executorClaims: [],
+    claudeSessions: {},
     iteration: 0,
     maxIterations,
     runId: `${date}-${seq}`,

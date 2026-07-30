@@ -11,6 +11,8 @@ import type {
   ToolDefinition,
 } from "./schemas.js";
 import { ModelConfigSchema } from "./schemas.js";
+import { runClaudeCode } from "./claude-code.js";
+import { debug } from "./debug.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal message types
@@ -188,6 +190,11 @@ async function* chatStreamOpenAI(
     ? combineSignals(options.signal, controller.signal)
     : controller.signal;
 
+  debug("llm", "openai-compatible fetch → start", {
+    provider: config.provider,
+    model: config.model,
+    url: `${baseUrl}/chat/completions`,
+  });
   let response: Response;
   try {
     response = await fetch(`${baseUrl}/chat/completions`, {
@@ -195,6 +202,10 @@ async function* chatStreamOpenAI(
       headers,
       body: JSON.stringify(body),
       signal,
+    });
+    debug("llm", "openai-compatible fetch → response headers received", {
+      status: response.status,
+      ok: response.ok,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -235,6 +246,9 @@ async function* chatStreamOpenAI(
   // OpenAI SSE format:
   //   data: {"choices":[{"delta":{"content":"token"}}]}
   //   data: [DONE]
+  // The last non-empty chunk carries finish_reason ("stop" | "length" |
+  // "tool_calls" | ...); we remember it and report it via onFinish at the end.
+  let finishReason: string | undefined;
   for await (const line of parseSSE(response)) {
     if (line === "[DONE]") break;
     if (!line.trim()) continue;
@@ -254,7 +268,9 @@ async function* chatStreamOpenAI(
         }>;
       };
 
-      const delta = parsed.choices?.[0]?.delta;
+      const choice = parsed.choices?.[0];
+      if (choice?.finish_reason) finishReason = choice.finish_reason;
+      const delta = choice?.delta;
       if (delta?.content) {
         yield delta.content;
       }
@@ -265,6 +281,8 @@ async function* chatStreamOpenAI(
       // Ignore malformed SSE lines
     }
   }
+  debug("llm", "openai-compatible stream → ended", { finishReason });
+  options.onFinish?.(finishReason);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -332,6 +350,12 @@ async function* chatStreamAnthropic(
     }));
   }
 
+  debug("llm", "anthropic fetch → start", {
+    model: config.model,
+    url: `${baseUrl}/v1/messages`,
+    thinkingEnabled,
+    maxTokens,
+  });
   const response = await fetch(`${baseUrl}/v1/messages`, {
     method: "POST",
     headers: {
@@ -341,6 +365,10 @@ async function* chatStreamAnthropic(
     },
     body: JSON.stringify(body),
     signal: options.signal,
+  });
+  debug("llm", "anthropic fetch → response headers received", {
+    status: response.status,
+    ok: response.ok,
   });
 
   if (!response.ok) {
@@ -367,6 +395,9 @@ async function* chatStreamAnthropic(
   let currentEvent = "";
   // Track whether current content block is a thinking block (to suppress output)
   let currentBlockIsThinking = false;
+  // Anthropic reports stop_reason on the message_delta event, near the end of
+  // the stream. We capture it and report it via onFinish on message_stop.
+  let stopReason: string | undefined;
 
   try {
     while (true) {
@@ -383,7 +414,19 @@ async function* chatStreamAnthropic(
         } else if (line.startsWith("data: ")) {
           const data = line.slice(6);
 
-          if (currentEvent === "content_block_start") {
+          if (currentEvent === "message_delta") {
+            // Carries the final stop_reason for the message.
+            try {
+              const parsed = JSON.parse(data) as {
+                delta?: { stop_reason?: string };
+              };
+              if (parsed.delta?.stop_reason) {
+                stopReason = parsed.delta.stop_reason;
+              }
+            } catch {
+              // Ignore malformed JSON
+            }
+          } else if (currentEvent === "content_block_start") {
             // Identify the block type so we know whether to suppress deltas
             try {
               const parsed = JSON.parse(data) as {
@@ -415,14 +458,86 @@ async function* chatStreamAnthropic(
               // Ignore malformed JSON
             }
           } else if (currentEvent === "message_stop") {
+            debug("llm", "anthropic stream → message_stop", { stopReason });
+            options.onFinish?.(stopReason);
             return;
           }
         }
       }
     }
+    // Stream ended without an explicit message_stop event.
+    debug("llm", "anthropic stream → ended without message_stop", { stopReason });
+    options.onFinish?.(stopReason);
   } finally {
     reader.releaseLock();
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Claude Code provider (subprocess)
+//
+// Used for the planner and verifier roles when provider is "claude-code".
+// These roles only need a single text completion, so we flatten the
+// conversation into one prompt and return the CLI's final result text.
+// Tools default to read-only so these roles never mutate the working tree.
+// The executor uses its own per-task path in executor.ts.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function flattenForClaudeCode(messages: Message[]): string {
+  return messages
+    .map((m) => {
+      if (m.role === "user") return m.content;
+      if (m.role === "assistant") return `[you previously responded]\n${m.content}`;
+      return `[tool result]\n${m.content}`;
+    })
+    .join("\n\n");
+}
+
+async function* chatStreamClaudeCode(
+  config: RoleModelConfig,
+  systemPrompt: string,
+  messages: Message[],
+  options: ChatOptions = {}
+): AsyncGenerator<string> {
+  const prompt = flattenForClaudeCode(messages);
+  debug("llm", "claude-code subprocess → invoking runClaudeCode", {
+    model: config.model,
+    promptLen: prompt.length,
+  });
+  const result = await runClaudeCode({
+    prompt,
+    systemPrompt: systemPrompt || undefined,
+    model: config.model,
+    allowedTools: config.claudeCode?.allowedTools,
+    // Read-only by default: planner/verifier inspect but never edit.
+    disallowedTools:
+      config.claudeCode?.disallowedTools ?? [
+        "Write",
+        "Edit",
+        "MultiEdit",
+        "NotebookEdit",
+      ],
+    dangerouslySkipPermissions:
+      config.claudeCode?.dangerouslySkipPermissions ?? true,
+    isolateConfig: config.claudeCode?.isolateConfig,
+    settingSources: config.claudeCode?.settingSources,
+    signal: options.signal,
+    // Forward live progress so non-streaming callers (planner/verifier) can
+    // surface the sub-Claude's tokens and tool uses in real time instead of
+    // going silent until the whole run finishes.
+    onToken: options.onToken,
+    onToolUse: options.onToolUse,
+  });
+  debug("llm", "claude-code subprocess → returned", {
+    textLen: result.text.length,
+    numTurns: result.numTurns,
+    toolUses: result.toolUses.length,
+  });
+  if (result.text) yield result.text;
+  // The subprocess only returns once its own agent loop has finished, so a
+  // return is always a clean stop. (normalizeStopReason ignores the raw value
+  // for claude-code, but we report one for symmetry.)
+  options.onFinish?.("end_turn");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -439,15 +554,13 @@ function parseToolCallsFromText(text: string): ToolCall[] {
 
   while ((match = toolBlockRegex.exec(text)) !== null) {
     try {
-      const parsed = JSON.parse(match[1].trim()) as {
-        name?: unknown;
-        arguments?: Record<string, unknown>;
-      };
-      if (parsed.name && typeof parsed.name === "string") {
+      const parsed = JSON.parse(match[1].trim()) as Record<string, unknown>;
+      const name = parsed.name;
+      if (name && typeof name === "string") {
         calls.push({
           id: `call_${calls.length}`,
-          tool_name: parsed.name,
-          arguments: parsed.arguments || {},
+          tool_name: name,
+          arguments: extractToolArguments(parsed),
         });
       }
     } catch {
@@ -456,6 +569,21 @@ function parseToolCallsFromText(text: string): ToolCall[] {
   }
 
   return calls;
+}
+
+/**
+ * Pull tool arguments out of a parsed tool block, tolerating both the documented
+ * shape `{"name","arguments":{...}}` and the common variant where models put the
+ * args flat alongside `name` (e.g. `{"name":"read_file","path":"x"}`).
+ */
+export function extractToolArguments(
+  parsed: Record<string, unknown>
+): Record<string, unknown> {
+  if (parsed.arguments && typeof parsed.arguments === "object") {
+    return parsed.arguments as Record<string, unknown>;
+  }
+  const { name: _name, arguments: _args, ...rest } = parsed;
+  return rest;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -510,6 +638,8 @@ export async function* chatStream(
 
   if (config.provider === "anthropic") {
     yield* chatStreamAnthropic(config, systemPrompt, chatMessages, options);
+  } else if (config.provider === "claude-code") {
+    yield* chatStreamClaudeCode(config, systemPrompt, chatMessages, options);
   } else {
     // "openai" and "local" both use OpenAI-compatible API
     let cfg = config;
@@ -533,6 +663,8 @@ export async function* chatStreamWithSystem(
 ): AsyncGenerator<string> {
   if (config.provider === "anthropic") {
     yield* chatStreamAnthropic(config, systemPrompt, messages, options);
+  } else if (config.provider === "claude-code") {
+    yield* chatStreamClaudeCode(config, systemPrompt, messages, options);
   } else {
     let cfg = config;
     if (config.provider === "openai" && !config.apiKey && process.env.OPENAI_API_KEY) {

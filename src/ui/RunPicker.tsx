@@ -34,11 +34,15 @@ export function RunPicker({ runs, onSelect, onCancel }: RunPickerProps) {
 
       {runs.map((run, idx) => {
         const selected = idx === cursor;
+        const iterLabel =
+          run.maxIterations === undefined
+            ? `iter ${run.iteration}`
+            : `iter ${run.iteration}/${run.maxIterations}`;
         const progress =
           run.totalItems > 0
-            ? `${run.doneItems}/${run.totalItems} items, iter ${run.iteration}/${run.maxIterations}`
+            ? `${run.doneItems}/${run.totalItems} items, ${iterLabel}`
             : run.hasState
-              ? `iter ${run.iteration}/${run.maxIterations}`
+              ? iterLabel
               : "no checkpoint";
         return (
           <Box key={run.runId} flexDirection="column">

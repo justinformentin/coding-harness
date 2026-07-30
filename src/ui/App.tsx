@@ -7,7 +7,12 @@ import { Input } from "./Input.js";
 import { PlanReview } from "./PlanReview.js";
 import { RunPicker } from "./RunPicker.js";
 import { runHarness, resumeHarness, type HarnessEvent } from "../harness.js";
-import { listRunsDetailed, loadState, type RunSummary } from "../run-store.js";
+import {
+  listRunsDetailed,
+  loadState,
+  loadEvents,
+  type RunSummary,
+} from "../run-store.js";
 import type { ModelConfig, PlannerChecklistItem } from "../schemas.js";
 
 type AppProps = {
@@ -53,7 +58,7 @@ export function App({
   );
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [iteration, setIteration] = useState(0);
-  const [maxIter, setMaxIter] = useState(maxIterations ?? 25);
+  const [maxIter, setMaxIter] = useState<number | undefined>(maxIterations);
   const [checklist, setChecklist] = useState<PlannerChecklistItem[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [planReviewState, setPlanReviewState] =
@@ -64,6 +69,16 @@ export function App({
     ((decision: "approve" | "reject") => void) | null
   >(null);
 
+  // Messages the user typed mid-run. The harness loop drains this at the top
+  // of each iteration via the drainSteering callback below and injects them
+  // into the executor conversation.
+  const steeringQueueRef = useRef<string[]>([]);
+  const drainSteering = useCallback(() => {
+    const queued = steeringQueueRef.current;
+    steeringQueueRef.current = [];
+    return queued;
+  }, []);
+
   const addLog = useCallback((source: LogEntry["source"], message: string) => {
     setLogs((prev) => [...prev, { source, message }]);
   }, []);
@@ -71,11 +86,82 @@ export function App({
   const handleEvent = useCallback(
     (event: HarnessEvent) => {
       switch (event.type) {
+        case "run_init":
+          break;
         case "plan_start":
           setStatus("planning");
           addLog("system", "Creating checklist from prompt...");
+          // Open a streaming placeholder the planner's tokens append into.
+          setLogs((prev) => [
+            ...prev,
+            { source: "planner" as const, message: "", streaming: true },
+          ]);
+          break;
+        case "plan_token":
+          // Append to the open planner streaming entry, or open a fresh one
+          // (e.g. text resuming right after a tool call).
+          setLogs((prev) => {
+            const updated = [...prev];
+            const lastIdx = updated.length - 1;
+            if (lastIdx >= 0 && updated[lastIdx].streaming) {
+              updated[lastIdx] = {
+                ...updated[lastIdx],
+                message: (updated[lastIdx].message + event.token).slice(-200),
+              };
+              return updated;
+            }
+            return [
+              ...prev,
+              {
+                source: "planner" as const,
+                message: event.token.slice(-200),
+                streaming: true,
+              },
+            ];
+          });
+          break;
+        case "plan_tool":
+          // Finalize the current streamed text, append the tool entry after it,
+          // then open a fresh placeholder for text that follows — preserving
+          // chronological order (text → tool → text).
+          setLogs((prev) => {
+            const updated = [...prev];
+            const lastIdx = updated.length - 1;
+            if (lastIdx >= 0 && updated[lastIdx].streaming) {
+              if (updated[lastIdx].message === "") {
+                updated.splice(lastIdx, 1);
+              } else {
+                updated[lastIdx] = { ...updated[lastIdx], streaming: false };
+              }
+            }
+            updated.push({
+              source: "tool",
+              message: event.detail
+                ? `${event.name} — ${event.detail}`
+                : event.name,
+            });
+            updated.push({
+              source: "planner" as const,
+              message: "",
+              streaming: true,
+            });
+            return updated;
+          });
           break;
         case "plan_complete":
+          // Close any trailing planner streaming entry before logging the count.
+          setLogs((prev) => {
+            const updated = [...prev];
+            const lastIdx = updated.length - 1;
+            if (lastIdx >= 0 && updated[lastIdx].streaming) {
+              if (updated[lastIdx].message === "") {
+                updated.splice(lastIdx, 1);
+              } else {
+                updated[lastIdx] = { ...updated[lastIdx], streaming: false };
+              }
+            }
+            return updated;
+          });
           addLog("planner", `Created ${event.itemCount} checklist items`);
           break;
         case "plan_review":
@@ -105,19 +191,40 @@ export function App({
           setIteration(event.iteration);
           setMaxIter(event.maxIterations);
           break;
+        case "steering":
+          addLog("user", `Steering applied: ${event.message}`);
+          break;
         case "executor_start":
           addLog(
             "executor",
             `Working on: ${event.itemId} — ${event.itemDescription}`,
           );
-          // Add a streaming placeholder entry that tokens will append into
-          setLogs((prev) => [
-            ...prev,
-            { source: "executor" as const, message: "", streaming: true },
-          ]);
+          // executor_start can now fire several times per iteration (one per
+          // item for the claude-code provider), so first close any streaming
+          // entry left open by the previous item, then open a fresh placeholder
+          // that this item's tokens append into.
+          setLogs((prev) => {
+            const updated = [...prev];
+            const lastIdx = updated.length - 1;
+            if (lastIdx >= 0 && updated[lastIdx].streaming) {
+              if (updated[lastIdx].message === "") {
+                updated.splice(lastIdx, 1);
+              } else {
+                updated[lastIdx] = { ...updated[lastIdx], streaming: false };
+              }
+            }
+            updated.push({
+              source: "executor" as const,
+              message: "",
+              streaming: true,
+            });
+            return updated;
+          });
           break;
         case "executor_token":
-          // Append the incoming token to the last streaming entry
+          // Append the incoming token to the open streaming entry. If there
+          // isn't one (e.g. text resuming right after a tool call), open a
+          // fresh placeholder so the text lands *after* the tool entry.
           setLogs((prev) => {
             const updated = [...prev];
             const lastIdx = updated.length - 1;
@@ -127,38 +234,63 @@ export function App({
                 // Keep only the last 200 chars to avoid blowing up the log line
                 message: (updated[lastIdx].message + event.token).slice(-200),
               };
+              return updated;
             }
-            return updated;
+            return [
+              ...prev,
+              {
+                source: "executor" as const,
+                message: event.token.slice(-200),
+                streaming: true,
+              },
+            ];
           });
           break;
         case "executor_tool":
-          // Surface each tool the executor invokes as it happens. Insert it
-          // just *before* the trailing streaming placeholder so that entry
-          // stays last (the token handlers rely on that invariant).
-          setLogs((prev) => {
-            const entry: LogEntry = {
-              source: "tool",
-              message: event.detail
-                ? `${event.name} — ${event.detail}`
-                : event.name,
-            };
-            const lastIdx = prev.length - 1;
-            if (lastIdx >= 0 && prev[lastIdx].streaming) {
-              const updated = [...prev];
-              updated.splice(lastIdx, 0, entry);
-              return updated;
-            }
-            return [...prev, entry];
-          });
-          break;
-        case "executor_complete":
-          // Close the streaming entry and replace with a summary
+          // Surface each tool the executor invokes as it happens. Finalize the
+          // current streaming text segment in place, then append the tool entry
+          // *after* it, then open a fresh placeholder so any text that follows
+          // streams below this tool call — preserving chronological order
+          // (text → tool → text → tool) instead of grouping tools together.
           setLogs((prev) => {
             const updated = [...prev];
             const lastIdx = updated.length - 1;
             if (lastIdx >= 0 && updated[lastIdx].streaming) {
-              // Remove the streaming placeholder; summary comes next
-              updated.splice(lastIdx, 1);
+              if (updated[lastIdx].message === "") {
+                // Empty placeholder (tool fired before any text) — drop it.
+                updated.splice(lastIdx, 1);
+              } else {
+                // Freeze the streamed text as a permanent entry.
+                updated[lastIdx] = { ...updated[lastIdx], streaming: false };
+              }
+            }
+            updated.push({
+              source: "tool",
+              message: event.detail
+                ? `${event.name} — ${event.detail}`
+                : event.name,
+            });
+            // Fresh placeholder for text that streams after this tool call.
+            updated.push({
+              source: "executor" as const,
+              message: "",
+              streaming: true,
+            });
+            return updated;
+          });
+          break;
+        case "executor_complete":
+          // Close the trailing streaming entry: drop it if empty, otherwise
+          // finalize the streamed text so it stays in the log.
+          setLogs((prev) => {
+            const updated = [...prev];
+            const lastIdx = updated.length - 1;
+            if (lastIdx >= 0 && updated[lastIdx].streaming) {
+              if (updated[lastIdx].message === "") {
+                updated.splice(lastIdx, 1);
+              } else {
+                updated[lastIdx] = { ...updated[lastIdx], streaming: false };
+              }
             }
             return updated;
           });
@@ -266,6 +398,7 @@ export function App({
         const state = await runHarness(prompt, config, handleEvent, {
           onPlanReview,
           maxIterations,
+          drainSteering,
         });
         setChecklist([...state.checklist]);
       } catch (e: unknown) {
@@ -274,16 +407,26 @@ export function App({
         setStatus("error");
       }
     },
-    [config, handleEvent, addLog, onPlanReview, maxIterations],
+    [config, handleEvent, addLog, onPlanReview, maxIterations, drainSteering],
   );
 
   const handleSubmit = useCallback(
     (value: string) => {
-      if (!value.trim() || submitted) return;
-      setSubmitted(true);
-      startRun(value);
+      const text = value.trim();
+      if (!text) return;
+      if (!submitted) {
+        // First prompt of the session — kick off the run.
+        setSubmitted(true);
+        startRun(text);
+        return;
+      }
+      // A run is already in flight: queue this as a steering message. The
+      // harness loop drains it (via drainSteering) at the start of the next
+      // iteration and injects it into the executor conversation.
+      steeringQueueRef.current.push(text);
+      addLog("user", `Steering queued (applies next iteration): ${text}`);
     },
-    [submitted, startRun],
+    [submitted, startRun, addLog],
   );
 
   const startResume = useCallback(
@@ -293,12 +436,36 @@ export function App({
       try {
         const state = await loadState(runId);
         setChecklist([...state.checklist]);
-        setMaxIter(state.maxIterations);
+        // Display the cap that will actually apply (flag/config), not the
+        // possibly-stale value saved with the run.
+        setMaxIter(maxIterations);
+
+        // Rebuild the transcript from the durable event log so resume doesn't
+        // start with a blank screen. Skip events that would block (plan_review)
+        // or that set a terminal status (complete/error/max_iterations) — the
+        // resumed loop drives status from here on.
+        const priorEvents = await loadEvents(runId);
+        if (priorEvents.length > 0) {
+          const REPLAY_SKIP = new Set([
+            "plan_review",
+            "complete",
+            "max_iterations",
+            "error",
+          ]);
+          for (const ev of priorEvents) {
+            if (!REPLAY_SKIP.has(ev.type)) handleEvent(ev);
+          }
+          addLog("system", `— replayed ${priorEvents.length} prior events —`);
+        }
+
         addLog(
           "system",
           `Loaded ${state.checklist.length} checklist items — continuing execution`,
         );
-        const finalState = await resumeHarness(state, config, handleEvent);
+        const finalState = await resumeHarness(state, config, handleEvent, {
+          drainSteering,
+          maxIterations,
+        });
         setChecklist([...finalState.checklist]);
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -306,7 +473,7 @@ export function App({
         setStatus("error");
       }
     },
-    [config, handleEvent, addLog],
+    [config, handleEvent, addLog, drainSteering, maxIterations],
   );
 
   const handleRunSelected = useCallback(
@@ -364,8 +531,17 @@ export function App({
           checklist={planReviewState.checklist}
           onDecision={handlePlanDecision}
         />
-      ) : (
-        !submitted && <Input onSubmit={handleSubmit} />
+      ) : status === "complete" || status === "error" ? null : (
+        // Visible both before the first prompt and while a run is in flight, so
+        // the user can steer the running loop with follow-up messages.
+        <Input
+          onSubmit={handleSubmit}
+          placeholder={
+            submitted
+              ? "Steer the agent… (applies next iteration)"
+              : "Enter your prompt..."
+          }
+        />
       )}
       {(status === "complete" || status === "error") && (
         <Box paddingX={1}>

@@ -1,0 +1,21 @@
+{
+  "planner": {
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-6",
+    "temperature": 0.2
+  },
+  "executor": {
+    "provider": "local",
+    "model": "Qwythos-9B-Claude-Mythos-5-1M-mxfp8-mlx",
+    "baseUrl": "http://localhost:8888/v1",
+    "apiKey": "local",
+    "temperature": 0.5
+  },
+  "verifier": {
+    "provider": "local",
+    "model": "Qwythos-9B-Claude-Mythos-5-1M-mxfp8-mlx",
+    "baseUrl": "http://localhost:8888/v1",
+    "apiKey": "local",
+    "temperature": 0.5
+  }
+}

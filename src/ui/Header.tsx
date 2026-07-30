@@ -3,7 +3,8 @@ import { Box, Text } from "ink";
 
 type HeaderProps = {
   iteration: number;
-  maxIterations: number;
+  // undefined = no cap configured
+  maxIterations: number | undefined;
   status:
     | "idle"
     | "resume_picker"
@@ -39,7 +40,8 @@ export function Header({ iteration, maxIterations, status }: HeaderProps) {
         <Text color={statusColors[status] || "white"}>{status}</Text>
         {iteration > 0 && (
           <Text dimColor>
-            iteration {iteration}/{maxIterations}
+            iteration {iteration}
+            {maxIterations === undefined ? "" : `/${maxIterations}`}
           </Text>
         )}
       </Box>

@@ -85,3 +85,7 @@ finalize(state) → summary, save run
 ```
 
 Run state is saved to `.runs/<runId>/` after each iteration for resume support.
+
+## Debug
+
+HARNESS_DEBUG=1 bun run src/cli.ts --claude-code --web
