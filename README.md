@@ -86,6 +86,10 @@ finalize(state) → summary, save run
 
 Run state is saved to `.runs/<runId>/` after each iteration for resume support.
 
+For the current architecture audit, comparisons with modern coding-agent
+harnesses, and the staged cleanup proposal, see
+[`docs/modernization-plan.md`](docs/modernization-plan.md).
+
 ## Debug
 
 HARNESS_DEBUG=1 bun run src/cli.ts --claude-code --web
