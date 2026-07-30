@@ -16,11 +16,11 @@ future work.
 - [x] Add fixtures and characterization tests for configuration precedence,
   plan parsing, free-form tool-call parsing, deterministic verification, and
   event persistence.
-- [ ] Add harness-level cancellation and resume characterization tests.
-- [ ] Add fake-provider end-to-end scenarios for success,
+- [x] Add harness-level cancellation and resume characterization tests.
+- [x] Add fake-provider end-to-end scenarios for success,
   repair-then-success, and budget exhaustion.
 - [x] Capture the legacy run layout as a checked-in fixture.
-- [ ] Meet the Phase 0 exit gate with all fake-provider scenarios passing.
+- [x] Meet the Phase 0 exit gate with all fake-provider scenarios passing.
 
 ### Remaining phases
 
