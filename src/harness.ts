@@ -11,6 +11,7 @@ import {
   appendIteration,
   appendVerifierReport,
   appendEvent,
+  FileRunStore,
 } from "./run-store.js";
 import type {
   HarnessState,
@@ -87,6 +88,8 @@ type Emitter = {
 function createEmitter(state: HarnessState, onEvent: EventCallback): Emitter {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let pending = false;
+  const durableWrites = new Set<Promise<void>>();
+  const runStore = new FileRunStore(state.runId);
 
   const save = () => {
     pending = false;
@@ -106,7 +109,14 @@ function createEmitter(state: HarnessState, onEvent: EventCallback): Emitter {
   };
 
   const emit: EventCallback = (event) => {
-    if (!SKIP_LOG_EVENTS.has(event.type)) void appendEvent(state.runId, event);
+    if (!SKIP_LOG_EVENTS.has(event.type)) {
+      const write = appendEvent(state.runId, event);
+      durableWrites.add(write);
+      void write.then(
+        () => durableWrites.delete(write),
+        () => durableWrites.delete(write),
+      );
+    }
     onEvent(event);
     schedule();
   };
@@ -116,7 +126,9 @@ function createEmitter(state: HarnessState, onEvent: EventCallback): Emitter {
       clearTimeout(timer);
       timer = undefined;
     }
+    await Promise.all([...durableWrites]);
     await save();
+    await runStore.writeCheckpoint(await runStore.replay());
   };
 
   return { emit, flush };

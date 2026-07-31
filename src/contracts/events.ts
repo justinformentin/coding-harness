@@ -15,3 +15,6 @@ export const RunEventSchema = z
   })
   .strict();
 export type RunEvent = z.infer<typeof RunEventSchema>;
+
+export type RunEventInput = Pick<RunEvent, "type" | "data"> &
+  Partial<Pick<RunEvent, "spanId" | "parentSpanId" | "stepId" | "attempt">>;

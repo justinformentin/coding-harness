@@ -6,7 +6,7 @@ import { loadConfig } from "../src/config.js";
 import { parsePlannerOutput } from "../src/planner.js";
 import { parseToolCalls } from "../src/executor.js";
 import { verify } from "../src/verifier.js";
-import { loadEvents } from "../src/run-store.js";
+import { FileRunStore, loadEvents } from "../src/run-store.js";
 import { createInitialState } from "../src/state.js";
 import type { HarnessState, PlannerChecklistItem } from "../src/schemas.js";
 
@@ -142,11 +142,52 @@ describe("event persistence", () => {
     const dir = await tempWorkspace();
     process.chdir(dir);
     await mkdir(".runs/partial", { recursive: true });
+    const store = new FileRunStore("partial");
+    await store.append({ type: "plan_start", data: {} });
     await writeFile(
       ".runs/partial/events.jsonl",
-      '{"event":{"type":"plan_start"}}\n{"event":',
+      `${await readFile(".runs/partial/events.jsonl", "utf8")}{"event":`,
     );
     expect(await loadEvents("partial")).toEqual([{ type: "plan_start" }]);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("replays independently written stores and rebuilds an atomic checkpoint", async () => {
+    const dir = await tempWorkspace();
+    process.chdir(dir);
+    const first = new FileRunStore("first");
+    const second = new FileRunStore("second");
+    await Promise.all([
+      first.append({ type: "plan_start", data: {} }),
+      second.append({ type: "plan_start", data: {} }),
+    ]);
+    await first.append({ type: "iteration_start", data: { iteration: 1 } });
+    const projection = await first.replay();
+    expect(projection.lastSequence).toBe(1);
+    expect(projection.iteration).toBe(1);
+    expect((await second.replay()).lastSequence).toBe(0);
+    await first.writeCheckpoint(projection);
+    expect(
+      JSON.parse(await readFile(".runs/first/checkpoint.json", "utf8")),
+    ).toEqual(projection);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("stores content-addressed artifacts and repairs only a partial tail", async () => {
+    const dir = await tempWorkspace();
+    process.chdir(dir);
+    const store = new FileRunStore("repairable");
+    const hash = await store.putArtifact("model output");
+    expect(await readFile(`.runs/repairable/artifacts/${hash}`, "utf8")).toBe(
+      "model output",
+    );
+    await store.append({ type: "plan_start", data: {} });
+    await writeFile(
+      ".runs/repairable/events.jsonl",
+      `${await readFile(".runs/repairable/events.jsonl", "utf8")}{"broken":`,
+    );
+    expect(await store.repairPartialTail()).toBe(true);
+    expect(await store.readEvents()).toHaveLength(1);
     await rm(dir, { recursive: true, force: true });
   });
 });
