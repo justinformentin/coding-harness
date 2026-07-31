@@ -72,7 +72,8 @@ export function validatePlan(plan: Plan): Plan {
   for (const step of parsed.steps) {
     if (ids.has(step.id)) throw new Error(`Duplicate plan step id: ${step.id}`);
     ids.add(step.id);
-    for (const assertion of step.verify)
+    for (let index = 0; index < step.verify.length; index++) {
+      const assertion = step.verify[index];
       if (
         assertion.kind === "file_matches" ||
         assertion.kind === "file_not_matches"
@@ -84,7 +85,19 @@ export function validatePlan(plan: Plan): Plan {
             `Invalid regular expression in step ${step.id}: ${assertion.pattern}`,
           );
         }
+      } else if (assertion.kind === "stdout") {
+        const match = /^assertion:(\d+)$/.exec(assertion.from);
+        const source = match ? Number(match[1]) : -1;
+        if (
+          source < 0 ||
+          source >= index ||
+          step.verify[source]?.kind !== "command"
+        )
+          throw new Error(
+            `Invalid stdout source in step ${step.id}: ${assertion.from} must reference an earlier command assertion`,
+          );
       }
+    }
   }
   for (const step of parsed.steps)
     for (const dependency of step.dependsOn)

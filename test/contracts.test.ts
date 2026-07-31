@@ -193,6 +193,17 @@ describe("versioned domain contracts", () => {
         ],
       }),
     ).toThrow("Invalid regular expression");
+    expect(() =>
+      validatePlan({
+        ...valid,
+        steps: [
+          {
+            ...valid.steps[0],
+            verify: [{ kind: "stdout", from: "assertion:1", contains: "pass" }],
+          },
+        ],
+      }),
+    ).toThrow("Invalid stdout source");
   });
   test("validates canonical event and result envelopes", () => {
     expect(

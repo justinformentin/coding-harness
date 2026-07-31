@@ -96,9 +96,5 @@ export const ResolvedConfigSchema = z
 export type ResolvedConfig = z.infer<typeof ResolvedConfigSchema>;
 
 export type ConfigSource =
-  | "default"
-  | "user"
-  | "project"
-  | "environment"
-  | "cli";
+  "default" | "user" | "project" | "environment" | "cli";
 export type ConfigProvenance = Record<string, ConfigSource>;

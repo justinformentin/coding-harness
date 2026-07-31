@@ -146,9 +146,13 @@ export class FileRunStore {
       ),
     );
     if (
-      ["succeeded", "failed", "cancelled", "budget_exhausted"].includes(
-        projection.status,
-      )
+      [
+        "succeeded",
+        "failed",
+        "cancelled",
+        "budget_exhausted",
+        "awaiting_review",
+      ].includes(projection.status)
     )
       await atomicWrite(
         join(this.directory, "result.json"),
@@ -242,20 +246,10 @@ export async function savePlanMarkdown(state: HarnessState): Promise<string> {
       lines.push("");
     }
 
-    if (item.verifierConfig) {
-      const vc = item.verifierConfig;
-      lines.push("**Verifier Config:**");
-      lines.push(
-        `- Required files: ${vc.requiredFiles?.join(", ") || "(none)"}`,
-      );
-      lines.push(
-        `- Required commands: ${vc.requiredCommands?.join(", ") || "(none)"}`,
-      );
-      lines.push(
-        `- Forbidden patterns: ${vc.forbiddenPatterns?.join(", ") || "(none)"}`,
-      );
-      lines.push("");
-    }
+    lines.push("**Assertions:**");
+    for (const assertion of item.assertions)
+      lines.push(`- \`${JSON.stringify(assertion)}\``);
+    lines.push("");
 
     lines.push("---", "");
   }
@@ -398,7 +392,7 @@ export async function listRunsDetailed(): Promise<RunSummary[]> {
       summary.maxIterations = state.maxIterations;
       summary.totalItems = state.checklist.length;
       summary.doneItems = state.checklist.filter(
-        (i) => i.status === "done",
+        (i) => i.status === "passed",
       ).length;
       summary.hasState = true;
     } catch {

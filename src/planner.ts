@@ -8,7 +8,7 @@ import {
   type RoleModelConfig,
   type Message,
 } from "./schemas.js";
-import { validatePlan, type Assertion } from "./contracts/plan.js";
+import { validatePlan } from "./contracts/plan.js";
 
 // How many times to re-prompt the planner when it returns something that
 // isn't valid JSON matching the schema. Models (especially ones without a
@@ -25,6 +25,8 @@ const MAX_EXPLORE_TURNS = 12;
 const MAX_TOOL_OUTPUT = 4000;
 
 export type PlannerCallbacks = {
+  /** Counts each provider round-trip for the run budget. */
+  onModelCall?: () => void;
   /** Fires for each chunk of assistant-visible text the planner streams. */
   onToken?: (token: string) => void;
   /** Fires in real time each time the planner invokes a tool. */
@@ -56,6 +58,7 @@ export async function plan(
   // Bound total round-trips: exploration turns plus a few attempts to coerce
   // valid JSON once exploration is done.
   for (let turn = 0; turn < MAX_EXPLORE_TURNS + MAX_PLAN_ATTEMPTS; turn++) {
+    callbacks?.onModelCall?.();
     debug("planner", `turn ${turn}: calling chat()`, {
       messageCount: messages.length,
     });
@@ -211,35 +214,6 @@ export function parsePlannerOutput(content: string): ParseResult {
   return { ok: true, value: result.data };
 }
 
-function checklistAssertions(item: PlannerChecklistItem): Assertion[] {
-  if (item.assertions?.length) return item.assertions;
-  const config = item.verifierConfig;
-  const assertions: Assertion[] = [];
-  for (const path of config?.requiredFiles ?? [])
-    assertions.push({ kind: "file_exists", path });
-  for (const pattern of config?.requiredPatterns ?? [])
-    assertions.push({ kind: "file_matches", path: ".", pattern });
-  for (const pattern of config?.forbiddenPatterns ?? [])
-    assertions.push({ kind: "file_not_matches", path: ".", pattern });
-  for (const command of config?.requiredCommands ?? [])
-    assertions.push({
-      kind: "command",
-      argv: command.trim().split(/\s+/),
-      exitCode: 0,
-    });
-  if (!assertions.length && item.verificationKind === "manual")
-    assertions.push({
-      kind: "human_review",
-      instructions: item.evidenceRequired.join("; ") || item.description,
-    });
-  if (!assertions.length && item.verificationKind === "llm")
-    assertions.push({
-      kind: "human_review",
-      instructions: `Semantic model review: ${item.description}`,
-    });
-  return assertions;
-}
-
 export function validatePlannerChecklist(
   goal: string,
   checklist: PlannerChecklistItem[],
@@ -251,7 +225,7 @@ export function validatePlannerChecklist(
       id: item.id,
       description: item.description,
       dependsOn: item.dependencies ?? [],
-      verify: checklistAssertions(item),
+      verify: item.assertions,
     })),
   });
 }

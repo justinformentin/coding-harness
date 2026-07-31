@@ -26,6 +26,7 @@ export type ExecutorResult = {
   response: string;
   toolCalls: ParsedToolCall[];
   toolResults: { name: string; output: string; success: boolean }[];
+  modelCalls: number;
 };
 
 export type ExecutorCallbacks = {
@@ -45,6 +46,10 @@ export type ExecutorCallbacks = {
    * their fetch. Threaded through every provider path below.
    */
   signal?: AbortSignal;
+  /** Restrict this pass to the scheduler-selected item. */
+  targetItemId?: string;
+  maxModelCalls?: number;
+  maxToolCalls?: number;
 };
 
 // Safety cap on how many model turns one execute-to-completion pass may take on
@@ -75,8 +80,7 @@ export async function executeToCompletion(
   debug("executor", "executeToCompletion", {
     provider: config.provider,
     pending: state.checklist.filter((i) => i.status === "pending").length,
-    inProgress: state.checklist.filter((i) => i.status === "in_progress")
-      .length,
+    inProgress: state.checklist.filter((i) => i.status === "executing").length,
   });
   // Provider-specific: claude-code spawns one fresh sub-Claude per item.
   if (config.provider === "claude-code") {
@@ -97,9 +101,13 @@ async function executeTextToCompletion(
 ): Promise<ExecutorResult> {
   // Text providers don't map individual turns to checklist items, so we just
   // mark the next pending item in_progress and announce the current target.
-  const nextItem = state.checklist.find((i) => i.status === "pending");
-  if (nextItem) nextItem.status = "in_progress";
-  const current = state.checklist.find((i) => i.status === "in_progress");
+  const nextItem = callbacks?.targetItemId
+    ? state.checklist.find((i) => i.id === callbacks.targetItemId)
+    : state.checklist.find((i) => i.status === "pending");
+  if (nextItem) nextItem.status = "executing";
+  const current = callbacks?.targetItemId
+    ? state.checklist.find((i) => i.id === callbacks.targetItemId)
+    : state.checklist.find((i) => i.status === "executing");
   if (current) {
     callbacks?.onItemStart?.({
       id: current.id,
@@ -111,11 +119,17 @@ async function executeTextToCompletion(
     response: "",
     toolCalls: [],
     toolResults: [],
+    modelCalls: 0,
   };
 
-  for (let step = 0; step < MAX_EXECUTOR_STEPS; step++) {
+  const maxTurns = Math.min(
+    MAX_EXECUTOR_STEPS,
+    callbacks?.maxModelCalls ?? MAX_EXECUTOR_STEPS,
+  );
+  for (let step = 0; step < maxTurns; step++) {
     debug("executor", `text turn ${step} start`);
     const turn = await executeTextTurn(state, config, callbacks);
+    aggregate.modelCalls++;
     debug("executor", `text turn ${step} done`, {
       toolCalls: turn.toolCalls.length,
       stopReason: turn.stopReason,
@@ -123,6 +137,12 @@ async function executeTextToCompletion(
     aggregate.response += (aggregate.response ? "\n" : "") + turn.response;
     aggregate.toolCalls.push(...turn.toolCalls);
     aggregate.toolResults.push(...turn.toolResults);
+
+    if (
+      aggregate.toolCalls.filter((call) => call.name !== FINISH_TOOL_NAME)
+        .length >= (callbacks?.maxToolCalls ?? Number.POSITIVE_INFINITY)
+    )
+      break;
 
     // Record any explicit completion claim so the verifier can credit manual
     // items the model says it finished.
@@ -245,7 +265,7 @@ async function executeTextTurn(
     state.messages.push({ role: "tool", content: toolOutputStr });
   }
 
-  return { response, toolCalls, toolResults, stopReason };
+  return { response, toolCalls, toolResults, modelCalls: 1, stopReason };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -270,14 +290,17 @@ async function executeAllItemsWithClaudeCode(
   config: RoleModelConfig,
   callbacks?: ExecutorCallbacks,
 ): Promise<ExecutorResult> {
-  const items = state.checklist.filter(
-    (i) => i.status === "pending" || i.status === "in_progress",
-  );
+  const items = callbacks?.targetItemId
+    ? state.checklist.filter((item) => item.id === callbacks.targetItemId)
+    : state.checklist.filter(
+        (i) => i.status === "pending" || i.status === "retryable",
+      );
 
   const aggregate: ExecutorResult = {
     response: "",
     toolCalls: [],
     toolResults: [],
+    modelCalls: 0,
   };
 
   debug("executor", "claude-code: executing items", {
@@ -295,6 +318,7 @@ async function executeAllItemsWithClaudeCode(
       item,
       callbacks,
     );
+    aggregate.modelCalls += turn.modelCalls;
     debug("executor", `claude-code: item ${item.id} done`, {
       toolCalls: turn.toolCalls.length,
     });
@@ -315,7 +339,7 @@ async function executeItemWithClaudeCode(
   const onToken = callbacks?.onToken;
   // The caller selected this item; mark it in_progress so the verifier can link
   // this sub-Claude's work to the right task.
-  item.status = "in_progress";
+  item.status = "executing";
 
   const prompt = claudeCodeExecutorPrompt(state, item);
   const before = new Set(gitChangedFiles());
@@ -402,7 +426,7 @@ async function executeItemWithClaudeCode(
     content: `[${item.id}] ${summaryText}`,
   });
 
-  return { response: result.text, toolCalls, toolResults };
+  return { response: result.text, toolCalls, toolResults, modelCalls: 1 };
 }
 
 function parseClaudeSummary(text: string): ClaudeSummary | null {

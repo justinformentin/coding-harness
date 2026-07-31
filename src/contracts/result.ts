@@ -10,6 +10,7 @@ export const StopReasonSchema = z.enum([
   "blocked",
   "fatal_error",
 ]);
+export type StopReason = z.infer<typeof StopReasonSchema>;
 export const RunResultSchema = z
   .object({
     schemaVersion: z.literal(1),

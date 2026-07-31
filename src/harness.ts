@@ -1,6 +1,5 @@
 import { plan } from "./planner.js";
 import { executeToCompletion } from "./executor.js";
-import { verify } from "./verifier.js";
 import { repairPrompt } from "./prompts.js";
 import { createInitialState } from "./state.js";
 import {
@@ -20,6 +19,13 @@ import type {
   VerifierReport,
 } from "./schemas.js";
 import { debug, time } from "./debug.js";
+import { DependencyScheduler, blockedSteps } from "./scheduler.js";
+import { DeterministicRunController } from "./run-controller.js";
+import {
+  captureWorkspaceDiff,
+  verifyStepAssertions,
+} from "./assertion-verifier.js";
+import type { StopReason } from "./contracts/result.js";
 
 export type HarnessEvent =
   | { type: "run_init"; runId: string }
@@ -35,6 +41,12 @@ export type HarnessEvent =
   | { type: "plan_approved" }
   | { type: "plan_rejected" }
   | {
+      type: "step_transition";
+      stepId: string;
+      from: PlannerChecklistItem["status"];
+      to: PlannerChecklistItem["status"];
+    }
+  | {
       type: "iteration_start";
       iteration: number;
       // undefined = no cap (loop runs until the verifier is satisfied)
@@ -48,9 +60,20 @@ export type HarnessEvent =
   | { type: "tool_result"; name: string; success: boolean; output: string }
   | { type: "verify_start" }
   | { type: "verify_complete"; report: VerifierReport; runId: string }
+  | {
+      type: "attempt_complete";
+      stepId: string;
+      attempt: number;
+      iteration: number;
+      modelCalls: number;
+      toolCalls: number;
+      stepAttempts: Record<string, number>;
+    }
   | { type: "repair"; instruction: string; runId: string }
   | { type: "complete"; state: HarnessState }
   | { type: "max_iterations"; state: HarnessState }
+  | { type: "budget_exhausted"; reason: StopReason; state: HarnessState }
+  | { type: "blocked"; reason: StopReason; state: HarnessState }
   | { type: "stopped"; state: HarnessState }
   | { type: "error"; message: string };
 
@@ -183,6 +206,28 @@ function isAbortError(signal: AbortSignal | undefined, e: unknown): boolean {
   return false;
 }
 
+function boundedRunSignal(
+  state: HarnessState,
+  config: ResolvedConfig,
+  external?: AbortSignal,
+): AbortSignal {
+  const controller = new AbortController();
+  const remaining = Math.max(
+    0,
+    state.startedAt + config.loop.deadlineSeconds * 1000 - Date.now(),
+  );
+  const timer = setTimeout(() => controller.abort("deadline"), remaining);
+  timer.unref?.();
+  if (external?.aborted) controller.abort(external.reason);
+  else
+    external?.addEventListener(
+      "abort",
+      () => controller.abort(external.reason),
+      { once: true },
+    );
+  return controller.signal;
+}
+
 // Append any queued steering messages to the conversation as user turns and
 // surface each one to the UI. Called at the start of every iteration so
 // follow-ups the user typed mid-run take effect on the next execute step.
@@ -198,6 +243,33 @@ function applySteering(
   }
 }
 
+const STEP_TRANSITIONS: Record<
+  PlannerChecklistItem["status"],
+  PlannerChecklistItem["status"][]
+> = {
+  pending: ["ready", "blocked", "failed", "skipped"],
+  ready: ["executing", "retryable", "failed"],
+  executing: ["verifying", "retryable", "failed"],
+  verifying: ["passed", "retryable", "failed"],
+  passed: ["retryable"],
+  retryable: ["ready", "blocked", "failed", "skipped"],
+  blocked: [],
+  failed: [],
+  skipped: [],
+};
+
+function transitionStep(
+  item: PlannerChecklistItem,
+  to: PlannerChecklistItem["status"],
+  emit: EventCallback,
+): void {
+  const from = item.status;
+  if (!STEP_TRANSITIONS[from].includes(to))
+    throw new Error(`Invalid step transition for ${item.id}: ${from} -> ${to}`);
+  item.status = to;
+  emit({ type: "step_transition", stepId: item.id, from, to });
+}
+
 export async function runHarness(
   prompt: string,
   config: ResolvedConfig,
@@ -209,6 +281,7 @@ export async function runHarness(
   const maxIterations = options.maxIterations;
 
   const state = createInitialState(prompt, maxIterations);
+  const runSignal = boundedRunSignal(state, config, options.signal);
   const { emit, flush } = createEmitter(state, onEvent);
   debug("harness", "runHarness starting", {
     runId: state.runId,
@@ -228,14 +301,17 @@ export async function runHarness(
     emit({ type: "plan_start" });
     state.checklist = await time("harness", "plan()", () =>
       plan(prompt, config.planner, {
+        onModelCall: () => state.modelCalls++,
         onToken: (token) => emit({ type: "plan_token", token }),
-        onToolUse: (use) =>
+        onToolUse: (use) => {
+          state.toolCalls++;
           emit({
             type: "plan_tool",
             name: use.name,
             detail: toolDetail(use.input),
-          }),
-        signal: options.signal,
+          });
+        },
+        signal: runSignal,
       }),
     );
     debug("harness", "plan complete", { itemCount: state.checklist.length });
@@ -255,6 +331,7 @@ export async function runHarness(
       const decision = await options.onPlanReview(planPath, state.checklist);
       debug("harness", "plan review decision received", { decision });
       if (decision === "reject") {
+        state.stopReason = "cancelled";
         emit({ type: "plan_rejected" });
         await flush();
         return state;
@@ -265,19 +342,25 @@ export async function runHarness(
     // Add initial user message for executor conversation
     state.messages.push({ role: "user", content: prompt });
 
-    await runHarnessLoop(state, config, emit, options);
+    await runHarnessLoop(state, config, emit, {
+      ...options,
+      signal: runSignal,
+    });
     await flush();
     return state;
   } catch (e: unknown) {
     // A user-requested stop surfaces as an abort here (e.g. the planner was
     // mid-call). Report it as a clean stop, not an error.
-    if (isAbortError(options.signal, e)) {
+    if (isAbortError(runSignal, e)) {
+      state.stopReason = options.signal?.aborted ? "cancelled" : "deadline";
       debug("harness", "runHarness aborted — stopping cleanly");
-      emit({ type: "stopped", state });
+      if (state.stopReason === "cancelled") emit({ type: "stopped", state });
+      else emit({ type: "budget_exhausted", reason: "deadline", state });
       await flush().catch(() => {});
       return state;
     }
     const msg = e instanceof Error ? e.message : String(e);
+    state.stopReason = "fatal_error";
     debug("harness", "runHarness threw", { error: msg });
     emit({ type: "error", message: msg });
     await flush().catch(() => {});
@@ -291,25 +374,29 @@ export async function resumeHarness(
   onEvent: EventCallback,
   options?: Pick<HarnessOptions, "drainSteering" | "maxIterations" | "signal">,
 ): Promise<HarnessState> {
-  // Reset iteration counter to allow more attempts.
-  state.iteration = 0;
-  // Re-derive the cap from current explicit sources rather than trusting the
-  // (possibly stale) value saved with the run. With no explicit cap this is
-  // undefined, so the resumed run is unbounded too.
-  state.maxIterations = options?.maxIterations;
+  // Durable attempts and counters are intentionally retained across resume.
+  if (options?.maxIterations !== undefined)
+    state.maxIterations = options.maxIterations;
+  const runSignal = boundedRunSignal(state, config, options?.signal);
   const { emit, flush } = createEmitter(state, onEvent);
   try {
-    await runHarnessLoop(state, config, emit, options);
+    await runHarnessLoop(state, config, emit, {
+      ...options,
+      signal: runSignal,
+    });
     await flush();
     return state;
   } catch (e: unknown) {
-    if (isAbortError(options?.signal, e)) {
+    if (isAbortError(runSignal, e)) {
+      state.stopReason = options?.signal?.aborted ? "cancelled" : "deadline";
       debug("harness", "resumeHarness aborted — stopping cleanly");
-      emit({ type: "stopped", state });
+      if (state.stopReason === "cancelled") emit({ type: "stopped", state });
+      else emit({ type: "budget_exhausted", reason: "deadline", state });
       await flush().catch(() => {});
       return state;
     }
     const msg = e instanceof Error ? e.message : String(e);
+    state.stopReason = "fatal_error";
     debug("harness", "resumeHarness threw", { error: msg });
     emit({ type: "error", message: msg });
     await flush().catch(() => {});
@@ -327,42 +414,79 @@ async function runHarnessLoop(
   options?: Pick<HarnessOptions, "drainSteering" | "maxIterations" | "signal">,
 ): Promise<HarnessState> {
   const signal = options?.signal;
-  // Main loop. Runs until the verifier reports done, or — when a cap is set —
-  // until that many iterations have run.
-  while (
-    state.maxIterations === undefined ||
-    state.iteration < state.maxIterations
-  ) {
-    // A stop requested between iterations ends the run cleanly before we kick
-    // off any more work. Mid-iteration stops surface as an abort from the
-    // execute/verify calls and are caught by the callers of this loop.
-    if (signal?.aborted) {
-      debug("harness", "loop saw abort at iteration boundary — stopping");
-      emit({ type: "stopped", state });
+  const scheduler = new DependencyScheduler();
+  const controller = new DeterministicRunController(state, config);
+
+  // A persisted in-flight operation was interrupted before verification could
+  // establish an outcome. Resume it as retryable without losing its counters.
+  for (const interrupted of state.checklist.filter((item) =>
+    ["ready", "executing", "verifying"].includes(item.status),
+  )) {
+    transitionStep(interrupted, "retryable", emit);
+  }
+
+  const stop = (reason: StopReason): HarnessState => {
+    state.stopReason = reason;
+    if (reason === "cancelled") emit({ type: "stopped", state });
+    else if (reason === "blocked") emit({ type: "blocked", reason, state });
+    else emit({ type: "budget_exhausted", reason, state });
+    return state;
+  };
+
+  while (true) {
+    if (
+      state.maxIterations !== undefined &&
+      state.iteration >= state.maxIterations
+    ) {
+      state.stopReason = "max_attempts";
+      emit({ type: "max_iterations", state });
       return state;
     }
-    state.iteration++;
-    debug("harness", `iteration ${state.iteration} start`, {
-      maxIterations: state.maxIterations,
-    });
+
+    const item = scheduler.next(state.checklist);
+    if (!item) {
+      if (state.checklist.every((step) => step.status === "passed")) {
+        state.stopReason = "completed";
+        emit({ type: "complete", state });
+        return state;
+      }
+      debug("harness", "scheduler found no runnable step", {
+        blocked: blockedSteps(state.checklist),
+      });
+      for (const blocked of state.checklist.filter((step) =>
+        ["pending", "retryable"].includes(step.status),
+      ))
+        transitionStep(blocked, "blocked", emit);
+      return stop("blocked");
+    }
+
+    const preflight = controller.beforeAttempt(item.id, signal);
+    if (preflight) {
+      if (preflight === "max_attempts") transitionStep(item, "failed", emit);
+      return stop(preflight);
+    }
+
+    const attempt = (state.stepAttempts[item.id] ?? 0) + 1;
+    transitionStep(item, "ready", emit);
+    transitionStep(item, "executing", emit);
+    debug("harness", `attempt ${attempt} for ${item.id} start`);
     emit({
       type: "iteration_start",
-      iteration: state.iteration,
+      iteration: state.iteration + 1,
       maxIterations: state.maxIterations,
     });
 
     // Inject any mid-run steering the user queued while we were busy
     applySteering(state, emit, options?.drainSteering);
 
-    // Execute to completion — the executor runs every outstanding item / turn
-    // before returning, so the verifier below sees a finished attempt rather
-    // than firing after each small step. Per-item progress is surfaced via
-    // onItemStart. Tokens and tool uses stream to the TUI in real time.
     const result = await time(
       "harness",
-      `iteration ${state.iteration} execute`,
+      `step ${item.id} attempt ${attempt} execute`,
       () =>
         executeToCompletion(state, config.executor, {
+          targetItemId: item.id,
+          maxModelCalls: config.loop.maxModelCalls - state.modelCalls,
+          maxToolCalls: config.loop.maxToolCalls - state.toolCalls,
           onToken: (token) => emit({ type: "executor_token", token }),
           onToolUse: (use) =>
             emit({
@@ -379,7 +503,7 @@ async function runHarnessLoop(
           signal,
         }),
     );
-    debug("harness", `iteration ${state.iteration} execute returned`, {
+    debug("harness", `step ${item.id} execute returned`, {
       toolCalls: result.toolCalls.length,
       responseLen: result.response.length,
     });
@@ -399,30 +523,88 @@ async function runHarnessLoop(
       });
     }
 
-    // Verify
     emit({ type: "verify_start" });
-    const report = await time(
-      "harness",
-      `iteration ${state.iteration} verify`,
-      () => verify(state, config.verifier, signal),
+    transitionStep(item, "verifying", emit);
+    const assertionTimeoutMs = Math.max(
+      1,
+      Math.min(
+        config.workspace.commandTimeoutSeconds * 1000,
+        state.startedAt + config.loop.deadlineSeconds * 1000 - Date.now(),
+      ),
     );
-    debug("harness", `iteration ${state.iteration} verify returned`, {
-      done: report.done,
-      completed: report.completedItems.length,
-      incomplete: report.incompleteItems.length,
-    });
+    const verification = await verifyStepAssertions(
+      item,
+      state,
+      config.workspace.root,
+      assertionTimeoutMs,
+      config.workspace.maxOutputBytes,
+    );
+    const completedItems: string[] = [];
+    const incompleteItems: string[] = [];
+    const missingEvidence = [...verification.failures];
+    if (verification.status === "failed") {
+      transitionStep(item, "retryable", emit);
+      incompleteItems.push(item.id);
+    } else {
+      transitionStep(item, "passed", emit);
+      completedItems.push(item.id);
+      if (
+        verification.status === "human_review" &&
+        !state.reviewRequired.includes(item.id)
+      )
+        state.reviewRequired.push(item.id);
+    }
+
+    // Later edits can invalidate earlier steps, so re-run their assertions.
+    for (const previous of state.checklist) {
+      if (previous.id === item.id || previous.status !== "passed") continue;
+      const regression = await verifyStepAssertions(
+        previous,
+        state,
+        config.workspace.root,
+        assertionTimeoutMs,
+        config.workspace.maxOutputBytes,
+      );
+      if (regression.status === "failed") {
+        transitionStep(previous, "retryable", emit);
+        incompleteItems.push(previous.id);
+        missingEvidence.push(...regression.failures);
+      } else completedItems.push(previous.id);
+    }
+    const done = state.checklist.every((step) => step.status === "passed");
+    const report: VerifierReport = {
+      done,
+      completedItems: [...new Set(completedItems)],
+      incompleteItems: [...new Set(incompleteItems)],
+      missingEvidence,
+      nextInstruction: missingEvidence.length
+        ? `Address the following: ${missingEvidence.join("; ")}`
+        : "",
+    };
     state.verifierReport = report;
     await appendVerifierReport(state, report);
     emit({ type: "verify_complete", report, runId: state.runId });
 
-    // Update checklist statuses based on verifier report
-    for (const itemId of report.completedItems) {
-      const item = state.checklist.find((i) => i.id === itemId);
-      if (item) item.status = "done";
-    }
-
-    // Save checkpoint
+    const budgetStop = controller.recordAttempt({
+      stepId: item.id,
+      modelCalls: result.modelCalls,
+      toolCalls: result.toolCalls.filter((call) => call.name !== "finish")
+        .length,
+      failures: missingEvidence,
+      workspaceDiff: await captureWorkspaceDiff(config.workspace.root),
+    });
+    emit({
+      type: "attempt_complete",
+      stepId: item.id,
+      attempt,
+      iteration: state.iteration,
+      modelCalls: state.modelCalls,
+      toolCalls: state.toolCalls,
+      stepAttempts: { ...state.stepAttempts },
+    });
     await appendIteration(state, {
+      stepId: item.id,
+      attempt,
       executorResponse: result.response.slice(0, 1000),
       toolCalls: result.toolCalls.length,
       verifierDone: report.done,
@@ -434,12 +616,15 @@ async function runHarnessLoop(
         runId: state.runId,
         iterations: state.iteration,
       });
+      state.stopReason = "completed";
       emit({ type: "complete", state });
       return state;
     }
 
+    if (budgetStop) return stop(budgetStop);
+
     // Repair prompt
-    debug("harness", `iteration ${state.iteration} not done — queuing repair`);
+    debug("harness", `step ${item.id} attempt ${attempt} needs repair`);
     const repair = repairPrompt(report);
     state.messages.push({ role: "user", content: repair });
     emit({
@@ -448,9 +633,4 @@ async function runHarnessLoop(
       runId: state.runId,
     });
   }
-
-  // Max iterations reached
-  debug("harness", "max iterations reached", { iteration: state.iteration });
-  emit({ type: "max_iterations", state });
-  return state;
 }

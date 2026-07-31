@@ -41,11 +41,10 @@ When you have seen enough, STOP calling tools and reply with ONLY the final plan
 ${toolSection}
 ## Verification — bias HARD toward deterministic checks
 
-Each item is verified after the executor attempts it. Verification is cheap and reliable when it can be done in CODE, and expensive and flaky when it needs another model. So design items to be machine-checkable wherever possible. Set "verificationKind" on every item:
+Each item is verified after the executor attempts it. Design every item around source-bound assertions:
 
-- "deterministic" — success can be checked mechanically. Provide a "verifierConfig" whose checks PROVE completion: a file that must exist, a command that must have run, a regex that must appear in a file or in command output, a pattern that must NOT appear, a success string in output. PREFER THIS. Reshape vague items into deterministic ones — e.g. instead of "improve the parser", write "add function parseFoo to src/parser.ts and a passing test test/parser.test.ts" with requiredFiles + a requiredPattern + a test command.
-- "manual" — success is genuinely subjective and cannot be checked by code or by another model reading artifacts (e.g. "brainstorm three product names", "write a creative intro paragraph"). For these the system only confirms the WORK WAS DONE, not that the content is good; quality is deferred to a later human review. Use sparingly.
-- "llm" — needs semantic judgment NOW that code can't do but a model reading the artifacts can (e.g. "ensure the error message is clear and actionable"). Use only when neither of the above fits; it costs an LLM call per item.
+- Prefer exact argv commands and path-specific file checks.
+- Use "human_review" only when completion is genuinely subjective. It never counts as a deterministic pass and the final result remains awaiting review.
 
 Most items should be "deterministic". Only fall back to "manual" or "llm" when you truly cannot express a code check.
 
@@ -60,14 +59,12 @@ Return ONLY valid JSON matching this schema:
       "acceptanceCriteria": ["string — how to know it's done"],
       "evidenceRequired": ["string — what evidence the verifier should check"],
       "evidenceFound": [],
-      "verificationKind": "deterministic | manual | llm",
-      "verifierConfig": {
-        "requiredCommands": ["optional — commands that must be run"],
-        "requiredFiles": ["optional — files that must exist after"],
-        "requiredPatterns": ["optional — regex patterns that must appear in files or diffs"],
-        "forbiddenPatterns": ["optional — patterns that must NOT appear"],
-        "successIndicators": ["optional — strings to look for in command output"]
-      },
+      "assertions": [
+        {"kind": "file_exists", "path": "relative/path"},
+        {"kind": "file_matches", "path": "relative/path", "pattern": "regex"},
+        {"kind": "command", "argv": ["bun", "test"], "exitCode": 0},
+        {"kind": "stdout", "from": "assertion:2", "contains": "pass"}
+      ],
       "suggestedCommands": ["optional — commands the executor should try"],
       "dependencies": ["optional — ids of items that must complete first"]
     }
@@ -76,7 +73,7 @@ Return ONLY valid JSON matching this schema:
 
 Rules:
 - Each item must be independently verifiable
-- Set "verificationKind" on every item; provide a proving "verifierConfig" for every "deterministic" item
+- Provide one or more source-bound "assertions" for every item
 - Include concrete acceptance criteria with specific evidence
 - Order items by dependencies
 - Keep items focused — one clear action per item
@@ -88,7 +85,7 @@ export function executorSystemPrompt(state: HarnessState): string {
   const checklistStr = state.checklist
     .map(
       (item) =>
-        `- [${item.status === "done" ? "x" : item.status === "in_progress" ? ">" : " "}] ${item.id}: ${item.description}`,
+        `- [${item.status === "passed" ? "x" : ["ready", "executing", "verifying", "retryable"].includes(item.status) ? ">" : " "}] ${item.id}: ${item.description}`,
     )
     .join("\n");
 
@@ -113,7 +110,7 @@ ${checklistStr}
 
 ## Rules
 
-- Work on the next incomplete item (marked with [ ] or [>])
+- Work only on the item marked [>]; the controller owns dependency scheduling
 - Use tools to inspect files, modify files, and run commands
 - After using a tool, analyze the result and decide the next step
 - After a tool call, STOP and wait for the result — do not imagine it

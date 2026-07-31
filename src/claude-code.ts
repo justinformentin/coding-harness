@@ -347,6 +347,7 @@ export function gitChangedFiles(cwd?: string): string[] {
     const out = execFileSync("git", ["status", "--porcelain"], {
       cwd,
       encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
     });
     return out
       .split("\n")

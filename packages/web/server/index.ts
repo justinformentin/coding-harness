@@ -101,8 +101,9 @@ async function listSessions(): Promise<SessionSummary[]> {
       summary.maxIterations = state.maxIterations ?? 0;
       summary.totalItems = state.checklist?.length ?? 0;
       summary.doneItems =
-        state.checklist?.filter((i: { status: string }) => i.status === "done")
-          .length ?? 0;
+        state.checklist?.filter(
+          (i: { status: string }) => i.status === "passed",
+        ).length ?? 0;
       summary.startedAt = state.startedAt ?? 0;
     } catch {}
 
