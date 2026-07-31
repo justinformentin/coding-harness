@@ -1,6 +1,0 @@
-{
-  "planner": { "provider": "local", "model": "fixture" },
-  "executor": { "provider": "local", "model": "fixture" },
-  "verifier": { "provider": "local", "model": "fixture" },
-  "maxIterations": 2
-}

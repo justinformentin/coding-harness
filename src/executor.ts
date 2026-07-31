@@ -70,12 +70,13 @@ const MAX_EXECUTOR_STEPS = 50;
 export async function executeToCompletion(
   state: HarnessState,
   config: RoleModelConfig,
-  callbacks?: ExecutorCallbacks
+  callbacks?: ExecutorCallbacks,
 ): Promise<ExecutorResult> {
   debug("executor", "executeToCompletion", {
     provider: config.provider,
     pending: state.checklist.filter((i) => i.status === "pending").length,
-    inProgress: state.checklist.filter((i) => i.status === "in_progress").length,
+    inProgress: state.checklist.filter((i) => i.status === "in_progress")
+      .length,
   });
   // Provider-specific: claude-code spawns one fresh sub-Claude per item.
   if (config.provider === "claude-code") {
@@ -92,7 +93,7 @@ export async function executeToCompletion(
 async function executeTextToCompletion(
   state: HarnessState,
   config: RoleModelConfig,
-  callbacks?: ExecutorCallbacks
+  callbacks?: ExecutorCallbacks,
 ): Promise<ExecutorResult> {
   // Text providers don't map individual turns to checklist items, so we just
   // mark the next pending item in_progress and announce the current target.
@@ -153,7 +154,7 @@ async function executeTextToCompletion(
 async function executeTextTurn(
   state: HarnessState,
   config: RoleModelConfig,
-  callbacks?: ExecutorCallbacks
+  callbacks?: ExecutorCallbacks,
 ): Promise<ExecutorResult & { stopReason: string | undefined }> {
   const onToken = callbacks?.onToken;
   const systemPrompt = executorSystemPrompt(state);
@@ -166,7 +167,9 @@ async function executeTextTurn(
   // from a truncation (hit token cap → not actually done).
   let stopReason: string | undefined;
   const chatOptions = {
-    onFinish: (raw?: string) => { stopReason = raw; },
+    onFinish: (raw?: string) => {
+      stopReason = raw;
+    },
     signal: callbacks?.signal,
   };
 
@@ -179,7 +182,7 @@ async function executeTextTurn(
       config,
       systemPrompt,
       messages,
-      chatOptions
+      chatOptions,
     )) {
       chunks.push(chunk);
       onToken(chunk);
@@ -187,7 +190,12 @@ async function executeTextTurn(
     response = chunks.join("");
   } else {
     // Non-streaming path (fallback when no onToken provided)
-    const chatResponse = await chat(config, systemPrompt, messages, chatOptions);
+    const chatResponse = await chat(
+      config,
+      systemPrompt,
+      messages,
+      chatOptions,
+    );
     response = chatResponse.content;
   }
 
@@ -227,10 +235,7 @@ async function executeTextTurn(
   const toolOutputStr =
     toolResults.length > 0
       ? toolResults
-          .map(
-            (r) =>
-              `[${r.name}] ${r.success ? "OK" : "ERROR"}: ${r.output}`
-          )
+          .map((r) => `[${r.name}] ${r.success ? "OK" : "ERROR"}: ${r.output}`)
           .join("\n\n")
       : "";
 
@@ -242,7 +247,6 @@ async function executeTextTurn(
 
   return { response, toolCalls, toolResults, stopReason };
 }
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Claude Code executor: one sub-Claude per checklist item
@@ -264,10 +268,10 @@ type ClaudeSummary = {
 async function executeAllItemsWithClaudeCode(
   state: HarnessState,
   config: RoleModelConfig,
-  callbacks?: ExecutorCallbacks
+  callbacks?: ExecutorCallbacks,
 ): Promise<ExecutorResult> {
   const items = state.checklist.filter(
-    (i) => i.status === "pending" || i.status === "in_progress"
+    (i) => i.status === "pending" || i.status === "in_progress",
   );
 
   const aggregate: ExecutorResult = {
@@ -285,7 +289,12 @@ async function executeAllItemsWithClaudeCode(
       description: item.description,
     });
     callbacks?.onItemStart?.({ id: item.id, description: item.description });
-    const turn = await executeItemWithClaudeCode(state, config, item, callbacks);
+    const turn = await executeItemWithClaudeCode(
+      state,
+      config,
+      item,
+      callbacks,
+    );
     debug("executor", `claude-code: item ${item.id} done`, {
       toolCalls: turn.toolCalls.length,
     });
@@ -301,7 +310,7 @@ async function executeItemWithClaudeCode(
   state: HarnessState,
   config: RoleModelConfig,
   item: PlannerChecklistItem,
-  callbacks?: ExecutorCallbacks
+  callbacks?: ExecutorCallbacks,
 ): Promise<ExecutorResult> {
   const onToken = callbacks?.onToken;
   // The caller selected this item; mark it in_progress so the verifier can link
@@ -399,9 +408,7 @@ async function executeItemWithClaudeCode(
 function parseClaudeSummary(text: string): ClaudeSummary | null {
   // Prefer the last fenced ```json block; fall back to the last raw object.
   const fences = [...text.matchAll(/```json\s*\n?([\s\S]*?)\n?```/g)];
-  let raw: string | null = fences.length
-    ? fences[fences.length - 1][1]
-    : null;
+  let raw: string | null = fences.length ? fences[fences.length - 1][1] : null;
   if (!raw) {
     const objMatch = text.match(/\{[\s\S]*\}/);
     raw = objMatch ? objMatch[0] : null;
@@ -420,7 +427,7 @@ function parseClaudeSummary(text: string): ClaudeSummary | null {
             .filter(
               (c): c is { command: string; output?: unknown } =>
                 Boolean(c) &&
-                typeof (c as { command?: unknown }).command === "string"
+                typeof (c as { command?: unknown }).command === "string",
             )
             .map((c) => ({
               command: c.command,

@@ -8,7 +8,11 @@ type PlanReviewProps = {
   onDecision: (decision: "approve" | "reject") => void;
 };
 
-export function PlanReview({ planPath, checklist, onDecision }: PlanReviewProps) {
+export function PlanReview({
+  planPath,
+  checklist,
+  onDecision,
+}: PlanReviewProps) {
   useInput((input, key) => {
     if (key.ctrl) return;
     const ch = input.toLowerCase();
@@ -76,15 +80,9 @@ export function PlanReview({ planPath, checklist, onDecision }: PlanReviewProps)
         </Box>
       ))}
 
-      <Box
-        borderStyle="single"
-        borderColor="yellow"
-        paddingX={1}
-        marginTop={1}
-      >
+      <Box borderStyle="single" borderColor="yellow" paddingX={1} marginTop={1}>
         <Text>
-          Plan saved to{" "}
-          <Text color="cyan">{planPath}</Text>
+          Plan saved to <Text color="cyan">{planPath}</Text>
         </Text>
       </Box>
 
@@ -92,9 +90,7 @@ export function PlanReview({ planPath, checklist, onDecision }: PlanReviewProps)
         <Text bold color="yellow">
           Approve this plan? (y/n){" "}
         </Text>
-        <Text dimColor>
-          y = start execution, n = reject and exit
-        </Text>
+        <Text dimColor>y = start execution, n = reject and exit</Text>
       </Box>
     </Box>
   );

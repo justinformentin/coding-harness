@@ -79,12 +79,16 @@ export async function listSessions(): Promise<Session[]> {
     };
 
     try {
-      const state = JSON.parse(await readFile(join(dir, "state.json"), "utf-8"));
+      const state = JSON.parse(
+        await readFile(join(dir, "state.json"), "utf-8"),
+      );
       session.iteration = state.iteration ?? 0;
       session.maxIterations = state.maxIterations ?? 0;
       session.checklist = (state.checklist as ChecklistItem[]) ?? [];
       session.totalItems = session.checklist.length;
-      session.doneItems = session.checklist.filter((i) => i.status === "done").length;
+      session.doneItems = session.checklist.filter(
+        (i) => i.status === "done",
+      ).length;
       session.startedAt = state.startedAt ?? 0;
     } catch {}
 
@@ -121,7 +125,9 @@ export async function getSession(id: string): Promise<Session | null> {
     session.maxIterations = state.maxIterations ?? 0;
     session.checklist = (state.checklist as ChecklistItem[]) ?? [];
     session.totalItems = session.checklist.length;
-    session.doneItems = session.checklist.filter((i) => i.status === "done").length;
+    session.doneItems = session.checklist.filter(
+      (i) => i.status === "done",
+    ).length;
     session.startedAt = state.startedAt ?? 0;
   } catch {
     // If there's no state.json at all the run dir likely doesn't exist
@@ -142,7 +148,10 @@ export async function listChats(sessionId: string): Promise<Chat[]> {
   }
 }
 
-export async function getChat(sessionId: string, chatId: number): Promise<Chat | null> {
+export async function getChat(
+  sessionId: string,
+  chatId: number,
+): Promise<Chat | null> {
   const chats = await listChats(sessionId);
   const chat = chats[chatId];
   return chat ?? null;

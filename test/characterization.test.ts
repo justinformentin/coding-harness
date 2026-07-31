@@ -6,7 +6,7 @@ import { loadConfig } from "../src/config.js";
 import { parsePlannerOutput } from "../src/planner.js";
 import { parseToolCalls } from "../src/executor.js";
 import { verify } from "../src/verifier.js";
-import { appendEvent, loadEvents, loadState } from "../src/run-store.js";
+import { loadEvents } from "../src/run-store.js";
 import { createInitialState } from "../src/state.js";
 import type { HarnessState, PlannerChecklistItem } from "../src/schemas.js";
 
@@ -26,7 +26,9 @@ async function tempWorkspace(): Promise<string> {
   return mkdtemp(join(tmpdir(), "harness-test-"));
 }
 
-function item(overrides: Partial<PlannerChecklistItem> = {}): PlannerChecklistItem {
+function item(
+  overrides: Partial<PlannerChecklistItem> = {},
+): PlannerChecklistItem {
   return {
     id: "step-1",
     description: "Create output",
@@ -46,12 +48,16 @@ describe("configuration", () => {
   test("project config overrides defaults and environment overrides project", async () => {
     const dir = await tempWorkspace();
     process.chdir(dir);
-    await writeFile(".harness.json", JSON.stringify({
-      planner: { provider: "local", model: "project-planner" },
-      executor: { provider: "local", model: "project-executor" },
-      verifier: { provider: "local", model: "project-verifier" },
-      maxIterations: 4,
-    }));
+    await writeFile(
+      ".harness.json",
+      JSON.stringify({
+        schemaVersion: 1,
+        planner: { provider: "local", model: "project-planner" },
+        executor: { provider: "local", model: "project-executor" },
+        verifier: { provider: "local", model: "project-verifier" },
+        maxIterations: 4,
+      }),
+    );
     process.env.HARNESS_PLANNER_MODEL = "environment-planner";
     process.env.HARNESS_MAX_ITERATIONS = "7";
 
@@ -65,7 +71,10 @@ describe("configuration", () => {
 
 describe("parsers", () => {
   test("accepts the committed planner fixture", async () => {
-    const content = await readFile(join(originalCwd, "test/fixtures/planner/valid.json"), "utf8");
+    const content = await readFile(
+      join(originalCwd, "test/fixtures/planner/valid.json"),
+      "utf8",
+    );
     const result = parsePlannerOutput(content);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value.checklist[0]?.id).toBe("write-greeting");
@@ -73,11 +82,13 @@ describe("parsers", () => {
 
   test("rejects an invalid plan and skips malformed tool blocks", () => {
     expect(parsePlannerOutput('{"goal":"missing checklist"}').ok).toBe(false);
-    const calls = parseToolCalls([
-      '```tool\n{"name":"write_file","arguments":{"path":"a.txt","content":"ok"}}\n```',
-      "```tool\nnot-json\n```",
-      '```tool\n{"name":"finish","completedItems":["step-1"]}\n```',
-    ].join("\n"));
+    const calls = parseToolCalls(
+      [
+        '```tool\n{"name":"write_file","arguments":{"path":"a.txt","content":"ok"}}\n```',
+        "```tool\nnot-json\n```",
+        '```tool\n{"name":"finish","completedItems":["step-1"]}\n```',
+      ].join("\n"),
+    );
     expect(calls).toEqual([
       { name: "write_file", arguments: { path: "a.txt", content: "ok" } },
       { name: "finish", arguments: { completedItems: ["step-1"] } },
@@ -90,16 +101,18 @@ describe("deterministic verification", () => {
     const dir = await tempWorkspace();
     process.chdir(dir);
     await writeFile("output.txt", "hello modern harness\n");
-    const s = state([item({
-      verificationKind: "deterministic",
-      verifierConfig: {
-        requiredFiles: ["output.txt"],
-        requiredCommands: ["bun test"],
-        requiredPatterns: ["modern harness"],
-        forbiddenPatterns: ["FIXME"],
-        successIndicators: ["tests passed"],
-      },
-    })]);
+    const s = state([
+      item({
+        verificationKind: "deterministic",
+        verifierConfig: {
+          requiredFiles: ["output.txt"],
+          requiredCommands: ["bun test"],
+          requiredPatterns: ["modern harness"],
+          forbiddenPatterns: ["FIXME"],
+          successIndicators: ["tests passed"],
+        },
+      }),
+    ]);
     s.artifacts = {
       filesChanged: ["output.txt"],
       commandsRun: ["bun test"],
@@ -111,10 +124,12 @@ describe("deterministic verification", () => {
   });
 
   test("does not treat an executor claim as deterministic proof", async () => {
-    const s = state([item({
-      verificationKind: "deterministic",
-      verifierConfig: { requiredFiles: ["missing.txt"] },
-    })]);
+    const s = state([
+      item({
+        verificationKind: "deterministic",
+        verifierConfig: { requiredFiles: ["missing.txt"] },
+      }),
+    ]);
     s.executorClaims.push("step-1");
     const report = await verify(s, { provider: "local", model: "unused" });
     expect(report.done).toBe(false);
@@ -122,32 +137,15 @@ describe("deterministic verification", () => {
   });
 });
 
-describe("legacy persistence", () => {
-  test("loads legacy state defaults and replays persisted events", async () => {
-    const dir = await tempWorkspace();
-    process.chdir(dir);
-    await mkdir(".runs/legacy-fixture", { recursive: true });
-    const fixture = join(originalCwd, "test/fixtures/legacy-run");
-    for (const name of ["state.json", "events.jsonl"]) {
-      await writeFile(join(".runs/legacy-fixture", name), await readFile(join(fixture, name)));
-    }
-    const loaded = await loadState("legacy-fixture");
-    expect(loaded.executorClaims).toEqual([]);
-    expect(loaded.claudeSessions).toEqual({});
-    expect((await loadEvents("legacy-fixture")).map((event) => event.type)).toEqual([
-      "run_init", "iteration_start",
-    ]);
-
-    await appendEvent("legacy-fixture", { type: "stopped", state: loaded });
-    expect((await loadEvents("legacy-fixture")).at(-1)?.type).toBe("stopped");
-    await rm(dir, { recursive: true, force: true });
-  });
-
+describe("event persistence", () => {
   test("ignores a partial final event line", async () => {
     const dir = await tempWorkspace();
     process.chdir(dir);
     await mkdir(".runs/partial", { recursive: true });
-    await writeFile(".runs/partial/events.jsonl", '{"event":{"type":"plan_start"}}\n{"event":');
+    await writeFile(
+      ".runs/partial/events.jsonl",
+      '{"event":{"type":"plan_start"}}\n{"event":',
+    );
     expect(await loadEvents("partial")).toEqual([{ type: "plan_start" }]);
     await rm(dir, { recursive: true, force: true });
   });

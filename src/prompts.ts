@@ -6,7 +6,9 @@ import type {
 import { toolsToPromptDescription, READ_ONLY_TOOL_NAMES } from "./tools.js";
 import { FINISH_TOOL_PROMPT } from "./completion.js";
 
-export function plannerSystemPrompt(opts?: { freeformTools?: boolean }): string {
+export function plannerSystemPrompt(opts?: {
+  freeformTools?: boolean;
+}): string {
   // When freeformTools is set (API/local providers), the planner explores the
   // repo via freeform ```tool blocks that the harness executes. Claude Code has
   // its own native tools, so that path omits these instructions.
@@ -86,7 +88,7 @@ export function executorSystemPrompt(state: HarnessState): string {
   const checklistStr = state.checklist
     .map(
       (item) =>
-        `- [${item.status === "done" ? "x" : item.status === "in_progress" ? ">" : " "}] ${item.id}: ${item.description}`
+        `- [${item.status === "done" ? "x" : item.status === "in_progress" ? ">" : " "}] ${item.id}: ${item.description}`,
     )
     .join("\n");
 
@@ -129,7 +131,7 @@ ${checklistStr}
  */
 export function claudeCodeExecutorPrompt(
   state: HarnessState,
-  item: PlannerChecklistItem
+  item: PlannerChecklistItem,
 ): string {
   const criteria =
     item.acceptanceCriteria.map((c) => `- ${c}`).join("\n") ||

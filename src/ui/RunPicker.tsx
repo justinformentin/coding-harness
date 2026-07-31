@@ -60,9 +60,7 @@ export function RunPicker({ runs, onSelect, onCancel }: RunPickerProps) {
       })}
 
       <Box marginTop={1}>
-        <Text dimColor>
-          ↑/↓ to move · Enter to resume · q/Esc to cancel
-        </Text>
+        <Text dimColor>↑/↓ to move · Enter to resume · q/Esc to cancel</Text>
       </Box>
     </Box>
   );

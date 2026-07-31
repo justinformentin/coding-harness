@@ -93,12 +93,15 @@ async function listSessions(): Promise<SessionSummary[]> {
     };
 
     try {
-      const state = JSON.parse(await readFile(join(dir, "state.json"), "utf-8"));
+      const state = JSON.parse(
+        await readFile(join(dir, "state.json"), "utf-8"),
+      );
       summary.iteration = state.iteration ?? 0;
       summary.maxIterations = state.maxIterations ?? 0;
       summary.totalItems = state.checklist?.length ?? 0;
       summary.doneItems =
-        state.checklist?.filter((i: { status: string }) => i.status === "done").length ?? 0;
+        state.checklist?.filter((i: { status: string }) => i.status === "done")
+          .length ?? 0;
       summary.startedAt = state.startedAt ?? 0;
     } catch {}
 
@@ -123,7 +126,7 @@ async function listChats(sessionId: string): Promise<HarnessMessage[]> {
 // results, and verifier reports. Each returned object is the raw HarnessEvent
 // plus the timestamp it was recorded at.
 async function listEvents(
-  sessionId: string
+  sessionId: string,
 ): Promise<Array<Record<string, unknown>>> {
   const dir = join(getRunsDir(), sessionId);
   let raw: string;
@@ -255,7 +258,7 @@ app.post("/api/sessions", async (req, res) => {
           steeringQueues.set(capturedRunId, []);
           return queued;
         },
-      }
+      },
     );
     // Whatever the outcome (done, stopped, or error), the run is no longer
     // active — clear it from the registry so its status flips to not-running.
@@ -273,7 +276,7 @@ app.post("/api/sessions", async (req, res) => {
       runIdReady,
       harnessPromise.then(
         () => capturedRunId,
-        () => capturedRunId
+        () => capturedRunId,
       ),
     ]);
 
