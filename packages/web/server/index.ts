@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import { join } from "path";
+import { FileRunStore } from "../../../src/run-store.js";
 import { readdir, readFile } from "fs/promises";
 import { existsSync } from "fs";
 import { fileURLToPath } from "url";
@@ -128,30 +129,18 @@ async function listChats(sessionId: string): Promise<HarnessMessage[]> {
 async function listEvents(
   sessionId: string,
 ): Promise<Array<Record<string, unknown>>> {
-  const dir = join(getRunsDir(), sessionId);
-  let raw: string;
   try {
-    raw = await readFile(join(dir, "events.jsonl"), "utf-8");
+    const store = new FileRunStore(sessionId, getRunsDir());
+    return (await store.readEvents()).map((event) => ({
+      type: event.type,
+      ...event.data,
+      timestamp: event.timestamp,
+      eventId: event.eventId,
+      sequence: event.sequence,
+    }));
   } catch {
     return [];
   }
-  const events: Array<Record<string, unknown>> = [];
-  for (const line of raw.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const parsed = JSON.parse(trimmed) as {
-        timestamp?: number;
-        event?: Record<string, unknown>;
-      };
-      if (parsed.event) {
-        events.push({ ...parsed.event, timestamp: parsed.timestamp });
-      }
-    } catch {
-      // Skip a malformed / partially-written line.
-    }
-  }
-  return events;
 }
 
 // ---- API routes ----

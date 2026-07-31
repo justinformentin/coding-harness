@@ -8,7 +8,7 @@ import {
   printConfig,
   applyClaudeCodeOverride,
 } from "./config.js";
-import { listRuns } from "./run-store.js";
+import { FileRunStore, listRuns } from "./run-store.js";
 import { announceDebug, debug } from "./debug.js";
 
 // Read an explicit iteration cap from --max-iterations / --iterations, if any.
@@ -27,6 +27,32 @@ async function main() {
   const args = process.argv.slice(2);
   announceDebug();
   debug("cli", "main() started", { args });
+
+  if (
+    args[0] === "run" &&
+    ["inspect", "events", "repair"].includes(args[1] ?? "")
+  ) {
+    const command = args[1];
+    const runId = args[2];
+    if (!runId) throw new Error(`Usage: harness run ${command} ID`);
+    const store = new FileRunStore(runId);
+    if (command === "events") {
+      for (const event of await store.readEvents())
+        console.log(JSON.stringify(event));
+    } else if (command === "inspect") {
+      console.log(JSON.stringify(await store.replay(), null, 2));
+    } else {
+      const repaired = await store.repairPartialTail();
+      const projection = await store.replay();
+      await store.writeCheckpoint(projection);
+      console.log(
+        repaired
+          ? "Removed a partial final event and rebuilt checkpoint."
+          : "Event stream is valid; rebuilt checkpoint.",
+      );
+    }
+    return;
+  }
 
   // Handle flags
   if (args.includes("--web")) {
@@ -112,6 +138,9 @@ Usage:
   harness --config           Show model configuration
   harness config show       Show resolved, redacted config and provenance
   harness config validate   Strictly validate all configuration layers
+  harness run inspect ID    Replay a run and print its derived state
+  harness run events ID     Print canonical event envelopes as JSONL
+  harness run repair ID     Remove a partial tail and rebuild the checkpoint
   harness --list             List recent runs
   harness --resume ID        Resume a specific run by id
   harness --resume           Pick a recent run to resume interactively

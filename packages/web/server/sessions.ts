@@ -64,7 +64,7 @@ export async function listSessions(): Promise<Session[]> {
     const dir = join(runsDir, runId);
     let prompt = "(no prompt)";
     try {
-      prompt = (await readFile(join(dir, "prompt.md"), "utf-8")).trim();
+      prompt = (await readFile(join(dir, "request.md"), "utf-8")).trim();
     } catch {}
 
     const session: Session = {
@@ -103,9 +103,9 @@ export async function getSession(id: string): Promise<Session | null> {
 
   let prompt = "(no prompt)";
   try {
-    prompt = (await readFile(join(dir, "prompt.md"), "utf-8")).trim();
+    prompt = (await readFile(join(dir, "request.md"), "utf-8")).trim();
   } catch {
-    // prompt.md may not exist for all runs
+    // request.md may not exist if initialization did not finish
   }
 
   const session: Session = {
