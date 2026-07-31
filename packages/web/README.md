@@ -30,6 +30,7 @@ npm run dev
 ```
 
 This starts two processes concurrently:
+
 - `tsx watch server/index.ts` — Express API server (port 3131 by default)
 - `vite client` — Vite dev server for the React client (typically port 5173)
 
@@ -40,6 +41,7 @@ npm run build
 ```
 
 Outputs:
+
 - `dist/client/` — compiled React SPA
 - `dist/server/` — compiled Express server (ESM JS)
 
@@ -74,6 +76,7 @@ All endpoints return JSON.
 List all harness sessions.
 
 **Response:**
+
 ```json
 {
   "sessions": [
@@ -95,6 +98,7 @@ List all harness sessions.
 List all chat messages for a session.
 
 **Response:**
+
 ```json
 {
   "chats": [
@@ -108,7 +112,11 @@ List all chat messages for a session.
       "role": "assistant",
       "content": "response text",
       "toolCalls": [
-        { "id": "call_abc", "name": "Read", "arguments": "{\"file_path\":\"/foo\"}" }
+        {
+          "id": "call_abc",
+          "name": "Read",
+          "arguments": "{\"file_path\":\"/foo\"}"
+        }
       ]
     }
   ]
@@ -120,6 +128,7 @@ List all chat messages for a session.
 Get a single chat message by zero-based index.
 
 **Response:**
+
 ```json
 {
   "chat": {

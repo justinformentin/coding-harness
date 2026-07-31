@@ -35,7 +35,7 @@ export async function editFileTool(args: {
     const content = await readFile(args.path, "utf-8");
     if (!content.includes(args.old)) {
       throw new Error(
-        `String not found in ${args.path}: "${args.old.slice(0, 50)}..."`
+        `String not found in ${args.path}: "${args.old.slice(0, 50)}..."`,
       );
     }
     const updated = content.replace(args.old, args.new);

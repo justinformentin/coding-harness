@@ -6,7 +6,10 @@ type InputProps = {
   placeholder?: string;
 };
 
-export function Input({ onSubmit, placeholder = "Enter your prompt..." }: InputProps) {
+export function Input({
+  onSubmit,
+  placeholder = "Enter your prompt...",
+}: InputProps) {
   const [value, setValue] = useState("");
 
   useInput((input, key) => {
@@ -34,9 +37,7 @@ export function Input({ onSubmit, placeholder = "Enter your prompt..." }: InputP
       <Text bold color="green">
         {">"}{" "}
       </Text>
-      <Text>
-        {value || <Text dimColor>{placeholder}</Text>}
-      </Text>
+      <Text>{value || <Text dimColor>{placeholder}</Text>}</Text>
       <Text color="green">_</Text>
     </Box>
   );

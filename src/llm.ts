@@ -1,16 +1,11 @@
-import { existsSync, readFileSync } from "fs";
-import { homedir } from "os";
-import { join } from "path";
 import type {
   Message,
   RoleModelConfig,
-  ModelConfig,
   ChatOptions,
   ChatResponse,
   ToolCall,
   ToolDefinition,
 } from "./schemas.js";
-import { ModelConfigSchema } from "./schemas.js";
 import { runClaudeCode } from "./claude-code.js";
 import { debug } from "./debug.js";
 
@@ -27,8 +22,7 @@ function convertMessages(messages: Message[]): LLMMessage[] {
   return messages.map((m) => ({
     role:
       m.role === "tool" ? ("user" as const) : (m.role as "user" | "assistant"),
-    content:
-      m.role === "tool" ? `[Tool Result]\n${m.content}` : m.content,
+    content: m.role === "tool" ? `[Tool Result]\n${m.content}` : m.content,
   }));
 }
 
@@ -40,9 +34,7 @@ function convertMessages(messages: Message[]): LLMMessage[] {
  * Parse a Server-Sent Events stream from a Response body.
  * Yields each `data:` line's content (already stripped of the "data: " prefix).
  */
-async function* parseSSE(
-  response: Response
-): AsyncGenerator<string> {
+async function* parseSSE(response: Response): AsyncGenerator<string> {
   if (!response.body) throw new Error("Response body is null");
 
   const reader = response.body.getReader();
@@ -98,14 +90,14 @@ async function* chatStreamOpenAI(
   config: RoleModelConfig,
   systemPrompt: string,
   messages: Message[],
-  options: ChatOptions = {}
+  options: ChatOptions = {},
 ): AsyncGenerator<string> {
   const isLocal = config.provider === "local";
 
   // Local provider requires an explicit baseUrl — no defaults.
   if (isLocal && !config.baseUrl) {
     throw new Error(
-      "Local provider requires a baseUrl (e.g. http://localhost:11434/v1 for Ollama, http://localhost:1234/v1 for LM Studio)"
+      "Local provider requires a baseUrl (e.g. http://localhost:11434/v1 for Ollama, http://localhost:1234/v1 for LM Studio)",
     );
   }
 
@@ -209,9 +201,12 @@ async function* chatStreamOpenAI(
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (isLocal && (msg.includes("ECONNREFUSED") || msg.includes("fetch failed"))) {
+    if (
+      isLocal &&
+      (msg.includes("ECONNREFUSED") || msg.includes("fetch failed"))
+    ) {
       throw new Error(
-        `Could not connect to local model server at ${baseUrl}. Is the server running? (${msg})`
+        `Could not connect to local model server at ${baseUrl}. Is the server running? (${msg})`,
       );
     }
     throw err;
@@ -224,22 +219,22 @@ async function* chatStreamOpenAI(
       const lower = text.toLowerCase();
       if (lower.includes("max_tokens") || lower.includes("maximum")) {
         throw new Error(
-          `Local model error [${config.model}] (${response.status}): ${text}\nHint: Try removing or lowering maxTokens / localOptions.maxTokens in your config.`
+          `Local model error [${config.model}] (${response.status}): ${text}\nHint: Try removing or lowering maxTokens / localOptions.maxTokens in your config.`,
         );
       }
       if (lower.includes("tool") || lower.includes("function")) {
         throw new Error(
-          `Local model error [${config.model}] (${response.status}): ${text}\nHint: This model may not support tool calling. Set localOptions.supportsToolCalling: false in your config.`
+          `Local model error [${config.model}] (${response.status}): ${text}\nHint: This model may not support tool calling. Set localOptions.supportsToolCalling: false in your config.`,
         );
       }
       if (lower.includes("response_format") || lower.includes("json")) {
         throw new Error(
-          `Local model error [${config.model}] (${response.status}): ${text}\nHint: This model may not support JSON mode. Set localOptions.supportsJsonMode: false in your config.`
+          `Local model error [${config.model}] (${response.status}): ${text}\nHint: This model may not support JSON mode. Set localOptions.supportsJsonMode: false in your config.`,
         );
       }
     }
     throw new Error(
-      `OpenAI-compatible request failed [${config.provider}/${config.model}] (${response.status}): ${text}`
+      `OpenAI-compatible request failed [${config.provider}/${config.model}] (${response.status}): ${text}`,
     );
   }
 
@@ -299,18 +294,18 @@ async function* chatStreamAnthropic(
   config: RoleModelConfig,
   systemPrompt: string,
   messages: Message[],
-  options: ChatOptions = {}
+  options: ChatOptions = {},
 ): AsyncGenerator<string> {
   const baseUrl = config.baseUrl || "https://api.anthropic.com";
   const apiKey = config.apiKey || process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     throw new Error(
-      `ANTHROPIC_API_KEY is required for Anthropic provider [model: ${config.model}]`
+      `ANTHROPIC_API_KEY is required for Anthropic provider [model: ${config.model}]`,
     );
   }
 
   const anthropicMessages = convertMessages(messages).filter(
-    (m) => m.role !== "system"
+    (m) => m.role !== "system",
   );
 
   // Resolve thinking config: options take precedence over config-level setting
@@ -320,7 +315,9 @@ async function* chatStreamAnthropic(
 
   // max_tokens must cover both thinking tokens and output tokens
   const maxTokens =
-    options.maxTokens ?? config.maxTokens ?? (thinkingEnabled ? budgetTokens + 8192 : 16000);
+    options.maxTokens ??
+    config.maxTokens ??
+    (thinkingEnabled ? budgetTokens + 8192 : 16000);
 
   const body: Record<string, unknown> = {
     model: config.model,
@@ -374,7 +371,7 @@ async function* chatStreamAnthropic(
   if (!response.ok) {
     const text = await response.text();
     throw new Error(
-      `Anthropic request failed [model: ${config.model}] (${response.status}): ${text}`
+      `Anthropic request failed [model: ${config.model}] (${response.status}): ${text}`,
     );
   }
 
@@ -448,10 +445,7 @@ async function* chatStreamAnthropic(
               const parsed = JSON.parse(data) as {
                 delta?: { type?: string; text?: string };
               };
-              if (
-                parsed.delta?.type === "text_delta" &&
-                parsed.delta.text
-              ) {
+              if (parsed.delta?.type === "text_delta" && parsed.delta.text) {
                 yield parsed.delta.text;
               }
             } catch {
@@ -466,7 +460,9 @@ async function* chatStreamAnthropic(
       }
     }
     // Stream ended without an explicit message_stop event.
-    debug("llm", "anthropic stream → ended without message_stop", { stopReason });
+    debug("llm", "anthropic stream → ended without message_stop", {
+      stopReason,
+    });
     options.onFinish?.(stopReason);
   } finally {
     reader.releaseLock();
@@ -487,7 +483,8 @@ function flattenForClaudeCode(messages: Message[]): string {
   return messages
     .map((m) => {
       if (m.role === "user") return m.content;
-      if (m.role === "assistant") return `[you previously responded]\n${m.content}`;
+      if (m.role === "assistant")
+        return `[you previously responded]\n${m.content}`;
       return `[tool result]\n${m.content}`;
     })
     .join("\n\n");
@@ -497,7 +494,7 @@ async function* chatStreamClaudeCode(
   config: RoleModelConfig,
   systemPrompt: string,
   messages: Message[],
-  options: ChatOptions = {}
+  options: ChatOptions = {},
 ): AsyncGenerator<string> {
   const prompt = flattenForClaudeCode(messages);
   debug("llm", "claude-code subprocess → invoking runClaudeCode", {
@@ -510,13 +507,12 @@ async function* chatStreamClaudeCode(
     model: config.model,
     allowedTools: config.claudeCode?.allowedTools,
     // Read-only by default: planner/verifier inspect but never edit.
-    disallowedTools:
-      config.claudeCode?.disallowedTools ?? [
-        "Write",
-        "Edit",
-        "MultiEdit",
-        "NotebookEdit",
-      ],
+    disallowedTools: config.claudeCode?.disallowedTools ?? [
+      "Write",
+      "Edit",
+      "MultiEdit",
+      "NotebookEdit",
+    ],
     dangerouslySkipPermissions:
       config.claudeCode?.dangerouslySkipPermissions ?? true,
     isolateConfig: config.claudeCode?.isolateConfig,
@@ -577,7 +573,7 @@ function parseToolCallsFromText(text: string): ToolCall[] {
  * args flat alongside `name` (e.g. `{"name":"read_file","path":"x"}`).
  */
 export function extractToolArguments(
-  parsed: Record<string, unknown>
+  parsed: Record<string, unknown>,
 ): Record<string, unknown> {
   if (parsed.arguments && typeof parsed.arguments === "object") {
     return parsed.arguments as Record<string, unknown>;
@@ -597,9 +593,7 @@ function combineSignals(...signals: AbortSignal[]): AbortSignal {
       controller.abort(signal.reason);
       break;
     }
-    signal.addEventListener("abort", () =>
-      controller.abort(signal.reason)
-    );
+    signal.addEventListener("abort", () => controller.abort(signal.reason));
   }
   return controller.signal;
 }
@@ -621,7 +615,7 @@ function combineSignals(...signals: AbortSignal[]): AbortSignal {
 export async function* chatStream(
   config: RoleModelConfig,
   messages: Message[],
-  options: ChatOptions = {}
+  options: ChatOptions = {},
 ): AsyncGenerator<string> {
   // Extract systemPrompt from messages if it's the first system message,
   // otherwise use empty string. The callers currently pass system prompts
@@ -643,7 +637,11 @@ export async function* chatStream(
   } else {
     // "openai" and "local" both use OpenAI-compatible API
     let cfg = config;
-    if (config.provider === "openai" && !config.apiKey && process.env.OPENAI_API_KEY) {
+    if (
+      config.provider === "openai" &&
+      !config.apiKey &&
+      process.env.OPENAI_API_KEY
+    ) {
       cfg = { ...config, apiKey: process.env.OPENAI_API_KEY };
     }
     yield* chatStreamOpenAI(cfg, systemPrompt, chatMessages, options);
@@ -659,7 +657,7 @@ export async function* chatStreamWithSystem(
   config: RoleModelConfig,
   systemPrompt: string,
   messages: Message[],
-  options: ChatOptions = {}
+  options: ChatOptions = {},
 ): AsyncGenerator<string> {
   if (config.provider === "anthropic") {
     yield* chatStreamAnthropic(config, systemPrompt, messages, options);
@@ -667,7 +665,11 @@ export async function* chatStreamWithSystem(
     yield* chatStreamClaudeCode(config, systemPrompt, messages, options);
   } else {
     let cfg = config;
-    if (config.provider === "openai" && !config.apiKey && process.env.OPENAI_API_KEY) {
+    if (
+      config.provider === "openai" &&
+      !config.apiKey &&
+      process.env.OPENAI_API_KEY
+    ) {
       cfg = { ...config, apiKey: process.env.OPENAI_API_KEY };
     }
     yield* chatStreamOpenAI(cfg, systemPrompt, messages, options);
@@ -683,7 +685,7 @@ export async function* chatStreamWithSystem(
  * Hits GET {baseUrl}/models and returns a simple ok/error result.
  */
 export async function checkLocalModel(
-  config: RoleModelConfig
+  config: RoleModelConfig,
 ): Promise<{ ok: boolean; models?: string[]; error?: string }> {
   if (!config.baseUrl) {
     return {
@@ -740,7 +742,7 @@ export async function chat(
   config: RoleModelConfig,
   systemPrompt: string,
   messages: Message[],
-  options: ChatOptions = {}
+  options: ChatOptions = {},
 ): Promise<ChatResponse> {
   const chunks: string[] = [];
 
@@ -748,7 +750,7 @@ export async function chat(
     config,
     systemPrompt,
     messages,
-    options
+    options,
   )) {
     chunks.push(chunk);
   }
@@ -765,30 +767,3 @@ export async function chat(
 // ─────────────────────────────────────────────────────────────────────────────
 // Config loading (keep existing logic, cleaned up)
 // ─────────────────────────────────────────────────────────────────────────────
-
-export async function loadConfig(): Promise<ModelConfig> {
-  const candidates = [
-    join(process.cwd(), "harness.config.json"),
-    join(homedir(), ".config", "coding-harness", "config.json"),
-  ];
-
-  for (const path of candidates) {
-    if (existsSync(path)) {
-      try {
-        const raw = JSON.parse(readFileSync(path, "utf-8")) as unknown;
-        const result = ModelConfigSchema.safeParse(raw);
-        if (result.success) return result.data;
-        throw new Error(`Invalid config at ${path}: ${result.error.message}`);
-      } catch (e) {
-        if (e instanceof Error && e.message.startsWith("Invalid config")) {
-          throw e;
-        }
-        throw new Error(`Failed to parse config at ${path}: ${String(e)}`);
-      }
-    }
-  }
-
-  throw new Error(
-    `No config file found. Create harness.config.json in the project root or ~/.config/coding-harness/config.json`
-  );
-}

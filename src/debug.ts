@@ -63,18 +63,24 @@ export function debug(scope: string, message: string, detail?: unknown): void {
 export async function time<T>(
   scope: string,
   message: string,
-  fn: () => Promise<T>
+  fn: () => Promise<T>,
 ): Promise<T> {
   if (!debugEnabled) return fn();
   const start = performance.now();
   debug(scope, `${message} — start`);
   try {
     const result = await fn();
-    debug(scope, `${message} — done in ${Math.round(performance.now() - start)}ms`);
+    debug(
+      scope,
+      `${message} — done in ${Math.round(performance.now() - start)}ms`,
+    );
     return result;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    debug(scope, `${message} — FAILED after ${Math.round(performance.now() - start)}ms: ${msg}`);
+    debug(
+      scope,
+      `${message} — FAILED after ${Math.round(performance.now() - start)}ms: ${msg}`,
+    );
     throw e;
   }
 }
@@ -82,5 +88,8 @@ export async function time<T>(
 // Emitted once at startup so the user knows the log is live and where it lives.
 export function announceDebug(): void {
   if (!debugEnabled) return;
-  debug("harness", `=== debug tracing started (pid ${process.pid}) → ${logPath} ===`);
+  debug(
+    "harness",
+    `=== debug tracing started (pid ${process.pid}) → ${logPath} ===`,
+  );
 }

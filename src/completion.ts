@@ -45,7 +45,7 @@ export type FinishCall = {
 // Tolerates a missing/garbled payload — an empty completedItems list still
 // counts as "the model declared it's done", just with no per-item claims.
 export function parseFinishCall(
-  toolCalls: { name: string; arguments: Record<string, unknown> }[]
+  toolCalls: { name: string; arguments: Record<string, unknown> }[],
 ): FinishCall | null {
   const call = toolCalls.find((t) => t.name === FINISH_TOOL_NAME);
   if (!call) return null;
@@ -74,7 +74,7 @@ export type StopReason =
 // uses different strings, so this is the one place that knows their dialects.
 export function normalizeStopReason(
   provider: Provider,
-  raw: string | undefined
+  raw: string | undefined,
 ): StopReason {
   if (!raw) return "unknown";
 

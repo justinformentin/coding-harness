@@ -14,7 +14,7 @@ import {
 } from "./run-store.js";
 import type {
   HarnessState,
-  ModelConfig,
+  ResolvedConfig,
   PlannerChecklistItem,
   VerifierReport,
 } from "./schemas.js";
@@ -142,7 +142,7 @@ export type HarnessOptions = {
   maxIterations?: number;
   onPlanReview?: (
     planPath: string,
-    checklist: PlannerChecklistItem[]
+    checklist: PlannerChecklistItem[],
   ) => Promise<"approve" | "reject">;
   // Pulled at the top of each iteration to inject mid-run "steering" messages
   // the user typed while the loop was running. Returns the queued messages and
@@ -177,7 +177,7 @@ function isAbortError(signal: AbortSignal | undefined, e: unknown): boolean {
 function applySteering(
   state: HarnessState,
   emit: EventCallback,
-  drainSteering?: () => string[]
+  drainSteering?: () => string[],
 ): void {
   const pending = drainSteering?.() ?? [];
   for (const message of pending) {
@@ -188,17 +188,13 @@ function applySteering(
 
 export async function runHarness(
   prompt: string,
-  config: ModelConfig,
+  config: ResolvedConfig,
   onEvent: EventCallback,
-  options?: HarnessOptions | number
+  options: HarnessOptions = {},
 ): Promise<HarnessState> {
-  // Support legacy numeric fourth argument for backward compatibility
-  const opts: HarnessOptions =
-    typeof options === "number" ? { maxIterations: options } : options ?? {};
   // The cap is honored only when the caller explicitly sets one. Otherwise it
   // stays undefined and the loop runs until the verifier is satisfied.
-  const maxIterations =
-    typeof options === "number" ? options : opts.maxIterations;
+  const maxIterations = options.maxIterations;
 
   const state = createInitialState(prompt, maxIterations);
   const { emit, flush } = createEmitter(state, onEvent);
@@ -227,8 +223,8 @@ export async function runHarness(
             name: use.name,
             detail: toolDetail(use.input),
           }),
-        signal: opts.signal,
-      })
+        signal: options.signal,
+      }),
     );
     debug("harness", "plan complete", { itemCount: state.checklist.length });
     await time("harness", "saveChecklist", () => saveChecklist(state));
@@ -237,14 +233,14 @@ export async function runHarness(
 
     // Save plan as readable markdown and show it for review
     const planPath = await time("harness", "savePlanMarkdown", () =>
-      savePlanMarkdown(state)
+      savePlanMarkdown(state),
     );
     emit({ type: "plan_review", planPath, checklist: state.checklist });
 
     // If an approval callback is provided, wait for approval
-    if (opts.onPlanReview) {
+    if (options.onPlanReview) {
       debug("harness", "awaiting plan review decision (blocks on user)…");
-      const decision = await opts.onPlanReview(planPath, state.checklist);
+      const decision = await options.onPlanReview(planPath, state.checklist);
       debug("harness", "plan review decision received", { decision });
       if (decision === "reject") {
         emit({ type: "plan_rejected" });
@@ -257,13 +253,13 @@ export async function runHarness(
     // Add initial user message for executor conversation
     state.messages.push({ role: "user", content: prompt });
 
-    await runHarnessLoop(state, config, emit, opts);
+    await runHarnessLoop(state, config, emit, options);
     await flush();
     return state;
   } catch (e: unknown) {
     // A user-requested stop surfaces as an abort here (e.g. the planner was
     // mid-call). Report it as a clean stop, not an error.
-    if (isAbortError(opts.signal, e)) {
+    if (isAbortError(options.signal, e)) {
       debug("harness", "runHarness aborted — stopping cleanly");
       emit({ type: "stopped", state });
       await flush().catch(() => {});
@@ -279,9 +275,9 @@ export async function runHarness(
 
 export async function resumeHarness(
   state: HarnessState,
-  config: ModelConfig,
+  config: ResolvedConfig,
   onEvent: EventCallback,
-  options?: Pick<HarnessOptions, "drainSteering" | "maxIterations" | "signal">
+  options?: Pick<HarnessOptions, "drainSteering" | "maxIterations" | "signal">,
 ): Promise<HarnessState> {
   // Reset iteration counter to allow more attempts.
   state.iteration = 0;
@@ -314,9 +310,9 @@ export async function resumeHarness(
 // state.json continuously (see createEmitter).
 async function runHarnessLoop(
   state: HarnessState,
-  config: ModelConfig,
+  config: ResolvedConfig,
   emit: EventCallback,
-  options?: Pick<HarnessOptions, "drainSteering" | "maxIterations" | "signal">
+  options?: Pick<HarnessOptions, "drainSteering" | "maxIterations" | "signal">,
 ): Promise<HarnessState> {
   const signal = options?.signal;
   // Main loop. Runs until the verifier reports done, or — when a cap is set —
@@ -369,7 +365,7 @@ async function runHarnessLoop(
               itemDescription: item.description,
             }),
           signal,
-        })
+        }),
     );
     debug("harness", `iteration ${state.iteration} execute returned`, {
       toolCalls: result.toolCalls.length,
@@ -396,7 +392,7 @@ async function runHarnessLoop(
     const report = await time(
       "harness",
       `iteration ${state.iteration} verify`,
-      () => verify(state, config.verifier, signal)
+      () => verify(state, config.verifier, signal),
     );
     debug("harness", `iteration ${state.iteration} verify returned`, {
       done: report.done,

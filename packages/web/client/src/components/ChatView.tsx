@@ -1,6 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
-import type { Session } from '../App';
+import React, { useEffect, useRef, useState } from "react";
+import { useParams } from "react-router-dom";
+import type { Session } from "../App";
 
 // Raw HarnessEvent as persisted in events.jsonl (plus the recorded timestamp).
 // Kept loose on purpose — we only read the fields we render.
@@ -17,95 +17,109 @@ interface Entry {
 }
 
 function truncate(s: string, n: number): string {
-  return s.length > n ? s.slice(0, n) + '…' : s;
+  return s.length > n ? s.slice(0, n) + "…" : s;
 }
 
 function detailSuffix(ev: HarnessEvent): string {
   const detail = ev.detail as string | undefined;
-  return detail ? ` — ${detail}` : '';
+  return detail ? ` — ${detail}` : "";
 }
 
 // Turn a persisted HarnessEvent into a transcript line, mirroring what the TUI
 // log shows. Returns null for events with nothing worth displaying.
 function formatEvent(ev: HarnessEvent): Entry | null {
   switch (ev.type) {
-    case 'run_init':
-      return { source: 'system', text: `Run started (${String(ev.runId ?? '')})` };
-    case 'plan_start':
-      return { source: 'system', text: 'Creating checklist from prompt…' };
-    case 'plan_tool':
-      return { source: 'tool', text: `${String(ev.name)}${detailSuffix(ev)}` };
-    case 'plan_complete':
-      return { source: 'planner', text: `Created ${String(ev.itemCount)} checklist items` };
-    case 'plan_review':
+    case "run_init":
       return {
-        source: 'system',
+        source: "system",
+        text: `Run started (${String(ev.runId ?? "")})`,
+      };
+    case "plan_start":
+      return { source: "system", text: "Creating checklist from prompt…" };
+    case "plan_tool":
+      return { source: "tool", text: `${String(ev.name)}${detailSuffix(ev)}` };
+    case "plan_complete":
+      return {
+        source: "planner",
+        text: `Created ${String(ev.itemCount)} checklist items`,
+      };
+    case "plan_review":
+      return {
+        source: "system",
         text: `Plan ready — ${(ev.checklist as unknown[])?.length ?? 0} items`,
       };
-    case 'plan_approved':
-      return { source: 'system', text: 'Plan approved — starting execution' };
-    case 'plan_rejected':
-      return { source: 'system', text: 'Plan rejected — run cancelled' };
-    case 'iteration_start':
+    case "plan_approved":
+      return { source: "system", text: "Plan approved — starting execution" };
+    case "plan_rejected":
+      return { source: "system", text: "Plan rejected — run cancelled" };
+    case "iteration_start":
       return {
-        source: 'system',
+        source: "system",
         text: `Iteration ${String(ev.iteration)}${
-          ev.maxIterations ? `/${String(ev.maxIterations)}` : ''
+          ev.maxIterations ? `/${String(ev.maxIterations)}` : ""
         }`,
       };
-    case 'steering':
-      return { source: 'user', text: `Steering: ${String(ev.message)}` };
-    case 'executor_start':
+    case "steering":
+      return { source: "user", text: `Steering: ${String(ev.message)}` };
+    case "executor_start":
       return {
-        source: 'executor',
+        source: "executor",
         text: `Working on: ${String(ev.itemId)} — ${String(ev.itemDescription)}`,
       };
-    case 'executor_tool':
-      return { source: 'tool', text: `${String(ev.name)}${detailSuffix(ev)}` };
-    case 'executor_complete': {
+    case "executor_tool":
+      return { source: "tool", text: `${String(ev.name)}${detailSuffix(ev)}` };
+    case "executor_complete": {
       // The full assistant response is persisted here — the real content that
       // state.messages only stored a summary of.
-      const response = String(ev.response ?? '').trim();
+      const response = String(ev.response ?? "").trim();
       if (!response) {
         const n = Number(ev.toolCalls ?? 0);
-        return n > 0 ? { source: 'executor', text: `Made ${n} tool call(s)` } : null;
+        return n > 0
+          ? { source: "executor", text: `Made ${n} tool call(s)` }
+          : null;
       }
-      return { source: 'executor', text: response };
+      return { source: "executor", text: response };
     }
-    case 'tool_result':
+    case "tool_result":
       return {
-        source: 'tool',
-        text: `${String(ev.name)} ${ev.success ? 'OK' : 'FAIL'}: ${truncate(
-          String(ev.output ?? ''),
+        source: "tool",
+        text: `${String(ev.name)} ${ev.success ? "OK" : "FAIL"}: ${truncate(
+          String(ev.output ?? ""),
           2000,
         )}`,
       };
-    case 'verify_start':
-      return { source: 'system', text: 'Running verification…' };
-    case 'verify_complete': {
+    case "verify_start":
+      return { source: "system", text: "Running verification…" };
+    case "verify_complete": {
       const r = (ev.report ?? {}) as {
         done?: boolean;
         incompleteItems?: string[];
         missingEvidence?: string[];
         nextInstruction?: string;
       };
-      if (r.done) return { source: 'verifier', text: 'All items verified complete' };
+      if (r.done)
+        return { source: "verifier", text: "All items verified complete" };
       const parts: string[] = [];
-      if (r.incompleteItems?.length) parts.push(`Incomplete: ${r.incompleteItems.join(', ')}`);
-      if (r.missingEvidence?.length) parts.push(`Missing: ${r.missingEvidence.join('; ')}`);
+      if (r.incompleteItems?.length)
+        parts.push(`Incomplete: ${r.incompleteItems.join(", ")}`);
+      if (r.missingEvidence?.length)
+        parts.push(`Missing: ${r.missingEvidence.join("; ")}`);
       if (r.nextInstruction) parts.push(`Next: ${r.nextInstruction}`);
-      return { source: 'verifier', text: parts.join('\n') || 'Incomplete' };
+      return { source: "verifier", text: parts.join("\n") || "Incomplete" };
     }
-    case 'repair':
-      return { source: 'system', text: `Repair: ${String(ev.instruction ?? '')}` };
-    case 'complete':
-      return { source: 'system', text: 'Done! Run complete.' };
-    case 'stopped':
-      return { source: 'system', text: 'Run stopped.' };
-    case 'max_iterations':
-      return { source: 'error', text: 'Max iterations reached.' };
-    case 'error':
-      return { source: 'error', text: String(ev.message ?? 'error') };
+    case "repair":
+      return {
+        source: "system",
+        text: `Repair: ${String(ev.instruction ?? "")}`,
+      };
+    case "complete":
+      return { source: "system", text: "Done! Run complete." };
+    case "stopped":
+      return { source: "system", text: "Run stopped." };
+    case "max_iterations":
+      return { source: "error", text: "Max iterations reached." };
+    case "error":
+      return { source: "error", text: String(ev.message ?? "error") };
     default:
       return null;
   }
@@ -121,7 +135,7 @@ export default function ChatView({ onSessionCreated }: ChatViewProps) {
   // transcript, waiting for the first message to create the run.
   const isDraft = !id;
   const [entries, setEntries] = useState<Entry[]>([]);
-  const [input, setInput] = useState('');
+  const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   // Whether the harness loop is still actively executing (polled from the
   // server). Drives the Send ↔ Stop button toggle.
@@ -135,7 +149,9 @@ export default function ChatView({ onSessionCreated }: ChatViewProps) {
       .then((r) => r.json())
       .then((data) => {
         const events: HarnessEvent[] = data.events ?? [];
-        setEntries(events.map(formatEvent).filter((e): e is Entry => e !== null));
+        setEntries(
+          events.map(formatEvent).filter((e): e is Entry => e !== null),
+        );
       })
       .catch(() => {});
   };
@@ -171,7 +187,7 @@ export default function ChatView({ onSessionCreated }: ChatViewProps) {
   }, [id]);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [entries]);
 
   const sendMessage = async () => {
@@ -181,28 +197,32 @@ export default function ChatView({ onSessionCreated }: ChatViewProps) {
       if (isDraft) {
         // First message of a draft: create the run with this as its prompt.
         const promptText = input.trim();
-        const res = await fetch('/api/sessions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+        const res = await fetch("/api/sessions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ prompt: promptText }),
         });
         const data = await res.json();
         if (data.id) {
-          setInput('');
+          setInput("");
           setRunning(true);
-          onSessionCreated?.({ id: data.id, prompt: promptText, startedAt: Date.now() });
+          onSessionCreated?.({
+            id: data.id,
+            prompt: promptText,
+            startedAt: Date.now(),
+          });
         }
         return;
       }
 
       await fetch(`/api/sessions/${id}/messages`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         // Server expects { content } — this is the steering message injected at
         // the next iteration boundary.
         body: JSON.stringify({ content: input.trim() }),
       });
-      setInput('');
+      setInput("");
       fetchEvents();
     } finally {
       setSending(false);
@@ -216,7 +236,7 @@ export default function ChatView({ onSessionCreated }: ChatViewProps) {
     if (!id || stopping) return;
     setStopping(true);
     try {
-      await fetch(`/api/sessions/${id}/stop`, { method: 'POST' });
+      await fetch(`/api/sessions/${id}/stop`, { method: "POST" });
       setRunning(false);
       fetchEvents();
     } catch {
@@ -239,7 +259,7 @@ export default function ChatView({ onSessionCreated }: ChatViewProps) {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       sendMessage();
     }
@@ -247,10 +267,12 @@ export default function ChatView({ onSessionCreated }: ChatViewProps) {
 
   return (
     <div className="chat-view">
-      <h2>{isDraft ? 'New session' : `Session: ${id}`}</h2>
+      <h2>{isDraft ? "New session" : `Session: ${id}`}</h2>
       <div className="messages-scroll">
         {isDraft && entries.length === 0 && (
-          <div className="empty-state">Describe the task to start a new session.</div>
+          <div className="empty-state">
+            Describe the task to start a new session.
+          </div>
         )}
         {entries.map((entry, i) => (
           <div key={i} className={`message message--${entry.source}`}>
@@ -267,19 +289,23 @@ export default function ChatView({ onSessionCreated }: ChatViewProps) {
           onKeyDown={handleKeyDown}
           placeholder={
             isDraft
-              ? 'Describe the task… (Cmd+Enter to start)'
-              : 'Steer the agent… (Cmd+Enter to send, applies next iteration)'
+              ? "Describe the task… (Cmd+Enter to start)"
+              : "Steer the agent… (Cmd+Enter to send, applies next iteration)"
           }
           disabled={sending}
         />
         <button
           onClick={handlePrimaryAction}
-          disabled={
-            showStop ? stopping : sending || !input.trim()
-          }
-          className={showStop ? 'stop-button' : undefined}
+          disabled={showStop ? stopping : sending || !input.trim()}
+          className={showStop ? "stop-button" : undefined}
         >
-          {isDraft ? 'Start' : showStop ? (stopping ? 'Stopping…' : 'Stop') : 'Send'}
+          {isDraft
+            ? "Start"
+            : showStop
+              ? stopping
+                ? "Stopping…"
+                : "Stop"
+              : "Send"}
         </button>
       </div>
     </div>

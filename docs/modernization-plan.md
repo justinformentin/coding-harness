@@ -14,17 +14,16 @@ future work.
 
 - [x] Add a Bun test runner.
 - [x] Add fixtures and characterization tests for configuration precedence,
-  plan parsing, free-form tool-call parsing, deterministic verification, and
-  event persistence.
+      plan parsing, free-form tool-call parsing, deterministic verification, and
+      event persistence.
 - [x] Add harness-level cancellation and resume characterization tests.
 - [x] Add fake-provider end-to-end scenarios for success,
-  repair-then-success, and budget exhaustion.
-- [x] Capture the legacy run layout as a checked-in fixture.
+      repair-then-success, and budget exhaustion.
 - [x] Meet the Phase 0 exit gate with all fake-provider scenarios passing.
 
 ### Remaining phases
 
-- [ ] Phase 1 — contracts and configuration.
+- [x] Phase 1 — contracts and configuration.
 - [ ] Phase 2 — run store and trace protocol.
 - [ ] Phase 3 — deterministic step loop.
 - [ ] Phase 4 — model and context reliability.
@@ -342,7 +341,6 @@ Each phase should be a reviewable pull request and leave the harness runnable.
    parsing, deterministic checks, event persistence, cancellation, and resume.
 2. Add three end-to-end fake-provider scenarios: success, repair-then-success,
    and budget exhaustion. No network or real model should be required.
-3. Capture the current run layout as a legacy fixture.
 
 **Exit gate:** `bun test` and `bun run typecheck` pass; the fixtures demonstrate
 current resume and completion behavior.
@@ -353,7 +351,7 @@ current resume and completion behavior.
    `RunResult` schemas in modules grouped by domain rather than one schema file.
 2. Implement explicit layered config loading with provenance, strict errors,
    secret redaction, `harness config show`, and `harness config validate`.
-3. Add legacy config translation with warnings for one compatibility window.
+3. Require versioned configuration without a compatibility translation layer.
 4. Validate plan dependencies and assertions before plan approval.
 
 **Exit gate:** malformed config and plans fail before a model/tool call; no
@@ -366,7 +364,7 @@ fixture serializes credentials.
    checkpoints.
 2. Emit the canonical event envelope and derive checkpoint/result state through
    a pure reducer.
-3. Add migration/replay for legacy runs and commands: `harness run inspect ID`,
+3. Add replay commands for canonical runs: `harness run inspect ID`,
    `harness run events ID`, and `harness run repair ID`.
 4. Adapt TUI and web UI to the same reducer/event subscription rather than
    maintaining implicit interpretations.
@@ -445,7 +443,6 @@ Create short architecture decision records for:
 4. The shell policy: argv-only by default versus an explicitly enabled shell.
 5. Whether `human_review` prevents a run from being called `succeeded` or
    produces a distinct `awaiting_review` terminal state.
-6. The legacy run/config compatibility window.
 
 The first implementation PR should be Phase 0, not a controller rewrite. Tests
 and replay fixtures provide the safety net needed to simplify the prototype

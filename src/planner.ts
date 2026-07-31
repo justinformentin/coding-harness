@@ -8,6 +8,7 @@ import {
   type RoleModelConfig,
   type Message,
 } from "./schemas.js";
+import { validatePlan, type Assertion } from "./contracts/plan.js";
 
 // How many times to re-prompt the planner when it returns something that
 // isn't valid JSON matching the schema. Models (especially ones without a
@@ -35,7 +36,7 @@ export type PlannerCallbacks = {
 export async function plan(
   prompt: string,
   config: RoleModelConfig,
-  callbacks?: PlannerCallbacks
+  callbacks?: PlannerCallbacks,
 ): Promise<PlannerChecklistItem[]> {
   // Claude Code uses its own native tools; every other provider explores via
   // freeform ```tool blocks that we execute here.
@@ -66,7 +67,7 @@ export async function plan(
           onToken: callbacks?.onToken,
           onToolUse: callbacks?.onToolUse,
           signal: callbacks?.signal,
-        })
+        }),
     );
     debug("planner", `turn ${turn}: chat() returned`, {
       contentLen: content.length,
@@ -92,7 +93,7 @@ export async function plan(
           (tc) =>
             "```tool\n" +
             JSON.stringify({ name: tc.tool_name, arguments: tc.arguments }) +
-            "\n```"
+            "\n```",
         )
         .join("\n");
       messages.push({ role: "assistant", content: cleanAssistant });
@@ -101,7 +102,7 @@ export async function plan(
         console.error(
           `[planner] turn ${exploreTurns}: ${toolCalls
             .map((t) => `${t.tool_name}(${JSON.stringify(t.arguments)})`)
-            .join(", ")}`
+            .join(", ")}`,
         );
       }
 
@@ -110,18 +111,20 @@ export async function plan(
         // Guard against the model trying a mutating tool during planning.
         if (!READ_ONLY.has(tc.tool_name)) {
           outputs.push(
-            `[${tc.tool_name}] ERROR: not available while planning (read-only). Plan the change instead.`
+            `[${tc.tool_name}] ERROR: not available while planning (read-only). Plan the change instead.`,
           );
           continue;
         }
         const result = await time("planner", `tool ${tc.tool_name}`, () =>
-          executeTool(tc.tool_name, tc.arguments)
+          executeTool(tc.tool_name, tc.arguments),
         );
         const output =
           result.output.length > MAX_TOOL_OUTPUT
             ? result.output.slice(0, MAX_TOOL_OUTPUT) + "\n…(truncated)"
             : result.output;
-        outputs.push(`[${tc.tool_name}] ${result.success ? "OK" : "ERROR"}: ${output}`);
+        outputs.push(
+          `[${tc.tool_name}] ${result.success ? "OK" : "ERROR"}: ${output}`,
+        );
       }
       messages.push({ role: "tool", content: outputs.join("\n\n") });
       continue;
@@ -162,7 +165,7 @@ export async function plan(
 
   throw new Error(
     `Planner failed to produce valid JSON after ${parseAttempts} attempt(s). ` +
-      `Last error: ${lastError}`
+      `Last error: ${lastError}`,
   );
 }
 
@@ -196,7 +199,61 @@ export function parsePlannerOutput(content: string): ParseResult {
     };
   }
 
+  try {
+    validatePlannerChecklist(result.data.goal, result.data.checklist);
+  } catch (error) {
+    return {
+      ok: false,
+      error: `plan contract validation failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+
   return { ok: true, value: result.data };
+}
+
+function checklistAssertions(item: PlannerChecklistItem): Assertion[] {
+  if (item.assertions?.length) return item.assertions;
+  const config = item.verifierConfig;
+  const assertions: Assertion[] = [];
+  for (const path of config?.requiredFiles ?? [])
+    assertions.push({ kind: "file_exists", path });
+  for (const pattern of config?.requiredPatterns ?? [])
+    assertions.push({ kind: "file_matches", path: ".", pattern });
+  for (const pattern of config?.forbiddenPatterns ?? [])
+    assertions.push({ kind: "file_not_matches", path: ".", pattern });
+  for (const command of config?.requiredCommands ?? [])
+    assertions.push({
+      kind: "command",
+      argv: command.trim().split(/\s+/),
+      exitCode: 0,
+    });
+  if (!assertions.length && item.verificationKind === "manual")
+    assertions.push({
+      kind: "human_review",
+      instructions: item.evidenceRequired.join("; ") || item.description,
+    });
+  if (!assertions.length && item.verificationKind === "llm")
+    assertions.push({
+      kind: "human_review",
+      instructions: `Semantic model review: ${item.description}`,
+    });
+  return assertions;
+}
+
+export function validatePlannerChecklist(
+  goal: string,
+  checklist: PlannerChecklistItem[],
+): void {
+  validatePlan({
+    schemaVersion: 1,
+    goal,
+    steps: checklist.map((item) => ({
+      id: item.id,
+      description: item.description,
+      dependsOn: item.dependencies ?? [],
+      verify: checklistAssertions(item),
+    })),
+  });
 }
 
 function extractJSON(text: string): string {

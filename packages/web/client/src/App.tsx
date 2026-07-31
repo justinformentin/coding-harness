@@ -1,7 +1,7 @@
-import React, { useEffect, useState } from 'react';
-import { BrowserRouter, Routes, Route, useNavigate } from 'react-router-dom';
-import Sidebar from './components/Sidebar';
-import ChatView from './components/ChatView';
+import React, { useEffect, useState } from "react";
+import { BrowserRouter, Routes, Route, useNavigate } from "react-router-dom";
+import Sidebar from "./components/Sidebar";
+import ChatView from "./components/ChatView";
 
 // Mirrors the summary shape returned by GET /api/sessions.
 export interface Session {
@@ -15,7 +15,7 @@ function AppLayout() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    fetch('/api/sessions')
+    fetch("/api/sessions")
       .then((r) => r.json())
       .then((data) => setSessions(data.sessions ?? []));
   }, []);
@@ -24,7 +24,7 @@ function AppLayout() {
   // that waits for the user's first message. The run is created only once they
   // send that message (see handleSessionCreated).
   function handleNewSession() {
-    navigate('/new');
+    navigate("/new");
   }
 
   // Called by ChatView after the draft's first message creates a real run.
@@ -40,9 +40,20 @@ function AppLayout() {
       </aside>
       <main className="main-panel">
         <Routes>
-          <Route index element={<div className="empty-state">Select or create a session</div>} />
-          <Route path="new" element={<ChatView onSessionCreated={handleSessionCreated} />} />
-          <Route path="sessions/:id" element={<ChatView onSessionCreated={handleSessionCreated} />} />
+          <Route
+            index
+            element={
+              <div className="empty-state">Select or create a session</div>
+            }
+          />
+          <Route
+            path="new"
+            element={<ChatView onSessionCreated={handleSessionCreated} />}
+          />
+          <Route
+            path="sessions/:id"
+            element={<ChatView onSessionCreated={handleSessionCreated} />}
+          />
         </Routes>
       </main>
     </div>

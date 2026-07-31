@@ -42,7 +42,10 @@ function installProcessCleanup() {
   // grace period, then exit ourselves so the signal isn't swallowed.
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
     process.once(sig, () => {
-      debug("claude-code", `received ${sig} — killing ${liveChildren.size} child process(es)`);
+      debug(
+        "claude-code",
+        `received ${sig} — killing ${liveChildren.size} child process(es)`,
+      );
       killAllChildren("SIGTERM");
       const t = setTimeout(() => {
         killAllChildren("SIGKILL");
@@ -135,7 +138,7 @@ type StreamEvent = {
 };
 
 export async function runClaudeCode(
-  opts: RunClaudeCodeOptions
+  opts: RunClaudeCodeOptions,
 ): Promise<RunClaudeCodeResult> {
   const args = ["-p", "--output-format", "stream-json", "--verbose"];
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
@@ -256,8 +259,8 @@ export async function runClaudeCode(
         reject(
           new Error(
             "`claude` CLI not found on PATH. Install Claude Code, then authenticate " +
-              "with `claude login` (subscription) or `claude setup-token` (long-lived token)."
-          )
+              "with `claude login` (subscription) or `claude setup-token` (long-lived token).",
+          ),
         );
       } else {
         reject(err);
@@ -310,12 +313,12 @@ export async function runClaudeCode(
       } else if (sawResult && isError) {
         reject(
           new Error(
-            `Claude Code returned an error: ${finalText || stderr || "unknown error"}`
-          )
+            `Claude Code returned an error: ${finalText || stderr || "unknown error"}`,
+          ),
         );
       } else {
         const authIssue = /api key|login|auth|unauthor|credential/i.test(
-          stderr
+          stderr,
         );
         const hint = authIssue
           ? " — looks like an authentication issue; run `claude login` or set CLAUDE_CODE_OAUTH_TOKEN"
@@ -323,8 +326,8 @@ export async function runClaudeCode(
         reject(
           new Error(
             `Claude Code exited (code ${code}) without a result${hint}.` +
-              (stderr ? ` stderr: ${stderr.slice(-500)}` : "")
-          )
+              (stderr ? ` stderr: ${stderr.slice(-500)}` : ""),
+          ),
         );
       }
     });

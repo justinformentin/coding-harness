@@ -2,10 +2,15 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
-import { resumeHarness, runHarness, type HarnessEvent } from "../src/harness.js";
+import {
+  resumeHarness,
+  runHarness,
+  type HarnessEvent,
+} from "../src/harness.js";
 import { loadEvents } from "../src/run-store.js";
 import { createInitialState } from "../src/state.js";
-import type { ModelConfig, PlannerChecklistItem } from "../src/schemas.js";
+import { DEFAULT_CONFIG } from "../src/config.js";
+import type { ResolvedConfig, PlannerChecklistItem } from "../src/schemas.js";
 
 const originalCwd = process.cwd();
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
@@ -40,14 +45,19 @@ function sse(content: string): Response {
   });
 }
 
-function fakeProvider(responses: string[]): { config: ModelConfig; requests: () => number } {
+function fakeProvider(responses: string[]): {
+  config: ResolvedConfig;
+  requests: () => number;
+} {
   let requestCount = 0;
   const server = Bun.serve({
     port: 0,
     fetch() {
       const response = responses[requestCount++];
       return response === undefined
-        ? new Response("fake provider response queue exhausted", { status: 500 })
+        ? new Response("fake provider response queue exhausted", {
+            status: 500,
+          })
         : sse(response);
     },
   });
@@ -58,7 +68,12 @@ function fakeProvider(responses: string[]): { config: ModelConfig; requests: () 
     baseUrl: `http://127.0.0.1:${server.port}/v1`,
   };
   return {
-    config: { planner: role, executor: role, verifier: role },
+    config: {
+      ...structuredClone(DEFAULT_CONFIG),
+      planner: role,
+      executor: role,
+      verifier: role,
+    },
     requests: () => requestCount,
   };
 }
@@ -78,7 +93,11 @@ describe("fake-provider harness scenarios", () => {
     ]);
     const events: HarnessEvent[] = [];
 
-    const state = await runHarness("Create a greeting", provider.config, (event) => events.push(event));
+    const state = await runHarness(
+      "Create a greeting",
+      provider.config,
+      (event) => events.push(event),
+    );
 
     expect(state.verifierReport?.done).toBe(true);
     expect(await readFile("greeting.txt", "utf8")).toBe("hello\n");
@@ -97,7 +116,11 @@ describe("fake-provider harness scenarios", () => {
     ]);
     const events: HarnessEvent[] = [];
 
-    const state = await runHarness("Create a greeting", provider.config, (event) => events.push(event));
+    const state = await runHarness(
+      "Create a greeting",
+      provider.config,
+      (event) => events.push(event),
+    );
 
     expect(state.iteration).toBe(2);
     expect(state.verifierReport?.done).toBe(true);
@@ -114,9 +137,14 @@ describe("fake-provider harness scenarios", () => {
     ]);
     const events: HarnessEvent[] = [];
 
-    const state = await runHarness("Create a greeting", provider.config, (event) => events.push(event), {
-      maxIterations: 1,
-    });
+    const state = await runHarness(
+      "Create a greeting",
+      provider.config,
+      (event) => events.push(event),
+      {
+        maxIterations: 1,
+      },
+    );
 
     expect(state.verifierReport?.done).toBe(false);
     expect(state.iteration).toBe(1);
@@ -145,7 +173,7 @@ describe("cancellation and resume", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  test("resume preserves work and grants a fresh legacy iteration budget", async () => {
+  test("resume preserves work and grants a fresh iteration budget", async () => {
     const dir = await workspace();
     const provider = fakeProvider([
       '```tool\n{"name":"write_file","arguments":{"path":"greeting.txt","content":"resumed\\n"}}\n```\n```tool\n{"name":"finish","completedItems":["write-greeting"]}\n```',
@@ -156,7 +184,9 @@ describe("cancellation and resume", () => {
     state.messages.push({ role: "user", content: state.originalPrompt });
     await mkdir(join(".runs", state.runId), { recursive: true });
 
-    const resumed = await resumeHarness(state, provider.config, () => {}, { maxIterations: 1 });
+    const resumed = await resumeHarness(state, provider.config, () => {}, {
+      maxIterations: 1,
+    });
 
     expect(resumed.iteration).toBe(1);
     expect(resumed.verifierReport?.done).toBe(true);

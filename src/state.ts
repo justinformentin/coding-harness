@@ -2,7 +2,7 @@ import type { HarnessState, PlannerChecklistItem } from "./schemas.js";
 
 export function createInitialState(
   prompt: string,
-  maxIterations?: number
+  maxIterations?: number,
 ): HarnessState {
   const now = Date.now();
   const date = new Date(now).toISOString().split("T")[0];
@@ -22,10 +22,10 @@ export function createInitialState(
 }
 
 export function getNextPendingItem(
-  state: HarnessState
+  state: HarnessState,
 ): PlannerChecklistItem | undefined {
   return state.checklist.find(
-    (item) => item.status === "pending" || item.status === "in_progress"
+    (item) => item.status === "pending" || item.status === "in_progress",
   );
 }
 

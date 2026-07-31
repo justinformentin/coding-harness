@@ -2,7 +2,12 @@
 import React from "react";
 import { render } from "ink";
 import { App } from "./ui/App.js";
-import { loadConfig, printConfig, applyClaudeCodeOverride } from "./config.js";
+import {
+  loadConfig,
+  resolveConfig,
+  printConfig,
+  applyClaudeCodeOverride,
+} from "./config.js";
 import { listRuns } from "./run-store.js";
 import { announceDebug, debug } from "./debug.js";
 
@@ -11,7 +16,7 @@ import { announceDebug, debug } from "./debug.js";
 // number, leaving the loop unbounded.
 function parseMaxIterationsFlag(args: string[]): number | undefined {
   const idx = args.findIndex(
-    (a) => a === "--max-iterations" || a === "--iterations"
+    (a) => a === "--max-iterations" || a === "--iterations",
   );
   if (idx === -1) return undefined;
   const v = Number(args[idx + 1]);
@@ -32,16 +37,24 @@ async function main() {
       process.platform === "darwin"
         ? "open"
         : process.platform === "win32"
-        ? "start"
-        : "xdg-open";
+          ? "start"
+          : "xdg-open";
     exec(`${openCmd} http://localhost:3131`);
     console.log("Harness web UI running at http://localhost:3131");
     return;
   }
 
-  if (args.includes("--config")) {
-    const config = await loadConfig();
-    console.log(printConfig(config));
+  const configCommand =
+    args[0] === "config"
+      ? args[1]
+      : args.includes("--config")
+        ? "show"
+        : undefined;
+  if (configCommand === "show" || configCommand === "validate") {
+    const loaded = await resolveConfig();
+    if (configCommand === "show")
+      console.log(printConfig(loaded.config, loaded.provenance));
+    else console.log("Configuration is valid (schema version 1).");
     process.exit(0);
   }
 
@@ -78,12 +91,12 @@ async function main() {
     }
     if (runId) {
       render(
-        React.createElement(App, { config, resumeRunId: runId, maxIterations })
+        React.createElement(App, { config, resumeRunId: runId, maxIterations }),
       );
     } else {
       // No id — let the user pick interactively from recent runs
       render(
-        React.createElement(App, { config, resumePicker: true, maxIterations })
+        React.createElement(App, { config, resumePicker: true, maxIterations }),
       );
     }
     return;
@@ -97,6 +110,8 @@ coding-harness — AI coding agent with external verification
 Usage:
   harness                    Start interactive session
   harness --config           Show model configuration
+  harness config show       Show resolved, redacted config and provenance
+  harness config validate   Strictly validate all configuration layers
   harness --list             List recent runs
   harness --resume ID        Resume a specific run by id
   harness --resume           Pick a recent run to resume interactively
@@ -113,7 +128,7 @@ Usage:
                              HARNESS_MAX_ITERATIONS or "maxIterations" in
                              .harness.json (the flag overrides both).
   harness --help             Show this help
-    `.trim()
+    `.trim(),
     );
     process.exit(0);
   }
@@ -156,7 +171,7 @@ Usage:
       config,
       initialPrompt: promptArg || undefined,
       maxIterations,
-    })
+    }),
   );
 }
 

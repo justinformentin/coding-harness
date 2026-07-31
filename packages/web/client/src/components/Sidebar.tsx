@@ -1,5 +1,5 @@
-import React from 'react';
-import { NavLink } from 'react-router-dom';
+import React from "react";
+import { NavLink } from "react-router-dom";
 
 interface Session {
   id: string;
@@ -27,11 +27,13 @@ export default function Sidebar({ sessions, onNewSession }: SidebarProps) {
           <li key={s.id}>
             <NavLink
               to={`/sessions/${s.id}`}
-              className={({ isActive }) => isActive ? 'session-link active' : 'session-link'}
+              className={({ isActive }) =>
+                isActive ? "session-link active" : "session-link"
+              }
             >
               <span className="session-name">{s.prompt || s.id}</span>
               <span className="session-date">
-                {s.startedAt ? new Date(s.startedAt).toLocaleString() : ''}
+                {s.startedAt ? new Date(s.startedAt).toLocaleString() : ""}
               </span>
             </NavLink>
           </li>

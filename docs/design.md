@@ -113,20 +113,39 @@ Three provider types, one interface:
 type Provider = "openai" | "anthropic" | "local";
 
 type ModelConfig = {
-  planner:  { provider: Provider; model: string; baseUrl?: string; apiKey?: string };
-  executor: { provider: Provider; model: string; baseUrl?: string; apiKey?: string };
-  verifier: { provider: Provider; model: string; baseUrl?: string; apiKey?: string };
+  planner: {
+    provider: Provider;
+    model: string;
+    baseUrl?: string;
+    apiKey?: string;
+  };
+  executor: {
+    provider: Provider;
+    model: string;
+    baseUrl?: string;
+    apiKey?: string;
+  };
+  verifier: {
+    provider: Provider;
+    model: string;
+    baseUrl?: string;
+    apiKey?: string;
+  };
 };
 ```
 
 Two HTTP paths under the hood:
+
 1. **OpenAI-compatible** — covers OpenAI and local models (both `/v1/chat/completions`). Difference is baseUrl and apiKey.
 2. **Anthropic** — different API shape (`/v1/messages`, system as top-level field). Separate fetch function, same return type.
 
 Both return `string`. Caller parses JSON when structured output is expected.
 
 ```typescript
-async function chat(config: RoleModelConfig, messages: Message[]): Promise<string>
+async function chat(
+  config: RoleModelConfig,
+  messages: Message[],
+): Promise<string>;
 ```
 
 Dispatches to the right HTTP implementation based on `config.provider`.
@@ -140,15 +159,18 @@ No streaming for v1. No retry logic. Errors propagate and the run saves state fo
 Allowlisted tools only. The executor emits JSON tool calls, the harness parses and runs them.
 
 ### File tools
+
 - `read_file(path)` — returns file contents
 - `write_file(path, content)` — creates or overwrites
 - `edit_file(path, old, new)` — find-and-replace within a file
 - `list_files(path, pattern?)` — glob-based directory listing
 
 ### Shell tools
+
 - `run_command(command, cwd?)` — shell command with stdout/stderr capture, 30s timeout, scoped to project root
 
 ### Search tools
+
 - `grep(pattern, path?, include?)` — regex search across files
 - `git_diff()` — returns current diff
 
@@ -158,7 +180,10 @@ Tool results auto-append to `state.artifacts`. Tool definitions serialized into 
 type Tool = {
   name: string;
   description: string;
-  parameters: Record<string, { type: string; description: string; required?: boolean }>;
+  parameters: Record<
+    string,
+    { type: string; description: string; required?: boolean }
+  >;
   execute: (args: Record<string, unknown>) => Promise<string>;
 };
 ```
@@ -170,17 +195,20 @@ The core of the product. Only authority that can end the loop.
 ### Verification Hierarchy (checked in order)
 
 **Layer 1 — Deterministic checks (no model):**
+
 - Required files exist
 - Required commands were actually run
 - Forbidden patterns absent (TODO, placeholder, FIXME)
 - Expected patterns present in file contents or diffs
 
 **Layer 2 — Artifact checks:**
+
 - git diff output matches expected scope
 - Command outputs contain success indicators
 - All checklist items' evidenceRequired satisfied by evidenceFound
 
 **Layer 3 — LLM judge (only when deterministic checks aren't conclusive):**
+
 - Send checklist + artifacts + executor's claim to verifier model
 - Ask: "Based on the evidence, which items are actually complete?"
 - Parse structured JSON response
@@ -230,6 +258,7 @@ If the executor says "complete"/"done"/"finalized", the harness logs it but does
 ## TUI (ink)
 
 Four components:
+
 1. **Header** — title + iteration counter
 2. **Checklist** — status icons (✓ done, ⠋ in_progress, ○ pending, ✗ failed)
 3. **Log** — scrolling output from executor, tools, verifier

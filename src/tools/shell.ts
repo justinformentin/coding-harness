@@ -27,9 +27,7 @@ export async function runCommandTool(args: {
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     if (msg.includes("timeout") || msg.includes("Timeout")) {
-      throw new Error(
-        `Command timed out after ${timeout}ms: ${args.command}`
-      );
+      throw new Error(`Command timed out after ${timeout}ms: ${args.command}`);
     }
     throw new Error(`Command failed: ${msg}`);
   }

@@ -31,7 +31,7 @@ import { debug } from "./debug.js";
 export async function verify(
   state: HarnessState,
   config: RoleModelConfig,
-  signal?: AbortSignal
+  signal?: AbortSignal,
 ): Promise<VerifierReport> {
   const completed: string[] = [];
   const incomplete: string[] = [];
@@ -66,7 +66,7 @@ export async function verify(
         } else {
           incomplete.push(item.id);
           missing.push(
-            `${item.id}: executor has not reported this item complete yet`
+            `${item.id}: executor has not reported this item complete yet`,
           );
         }
         break;
@@ -117,9 +117,7 @@ export async function verify(
 // Resolve an item's verification kind. The planner usually sets it explicitly;
 // when it doesn't, infer: deterministic if there's a non-empty verifierConfig,
 // otherwise manual. (We never infer "llm" — that must be opted into.)
-function resolveVerificationKind(
-  item: PlannerChecklistItem
-): VerificationKind {
+function resolveVerificationKind(item: PlannerChecklistItem): VerificationKind {
   if (item.verificationKind) return item.verificationKind;
   return hasDeterministicChecks(item) ? "deterministic" : "manual";
 }
@@ -140,7 +138,7 @@ function hasDeterministicChecks(item: PlannerChecklistItem): boolean {
 // artifacts the executor produced. Pure code — no LLM, no network.
 function checkDeterministic(
   item: PlannerChecklistItem,
-  state: HarnessState
+  state: HarnessState,
 ): { passed: boolean; missing: string[] } {
   const missing: string[] = [];
   const config = item.verifierConfig;
@@ -151,7 +149,9 @@ function checkDeterministic(
   if (!config || !hasDeterministicChecks(item)) {
     return {
       passed: false,
-      missing: [`${item.id}: marked deterministic but has no verifierConfig checks`],
+      missing: [
+        `${item.id}: marked deterministic but has no verifierConfig checks`,
+      ],
     };
   }
 
@@ -181,7 +181,7 @@ function checkDeterministic(
       }
     });
     const foundInOutput = state.artifacts.commandOutputs.some((o) =>
-      regex.test(o)
+      regex.test(o),
     );
     if (!foundInFiles && !foundInOutput) {
       missing.push(`Pattern not found: "${pattern}" (required by ${item.id})`);
@@ -195,7 +195,7 @@ function checkDeterministic(
       try {
         if (regex.test(readFileSync(file, "utf-8"))) {
           missing.push(
-            `Forbidden pattern found: "${pattern}" in ${file} (violation in ${item.id})`
+            `Forbidden pattern found: "${pattern}" in ${file} (violation in ${item.id})`,
           );
         }
       } catch {
@@ -207,11 +207,11 @@ function checkDeterministic(
   // Success indicators must appear in some command's output.
   for (const indicator of config.successIndicators ?? []) {
     const found = state.artifacts.commandOutputs.some((o) =>
-      o.includes(indicator)
+      o.includes(indicator),
     );
     if (!found) {
       missing.push(
-        `Success indicator not found in output: "${indicator}" (required by ${item.id})`
+        `Success indicator not found in output: "${indicator}" (required by ${item.id})`,
       );
     }
   }
@@ -227,7 +227,7 @@ async function judgeItemWithLLM(
   item: PlannerChecklistItem,
   state: HarnessState,
   config: RoleModelConfig,
-  signal?: AbortSignal
+  signal?: AbortSignal,
 ): Promise<{ complete: boolean; missing: string[] }> {
   const payload = {
     item: {
@@ -241,7 +241,7 @@ async function judgeItemWithLLM(
       commandsRun: state.artifacts.commandsRun,
       // Trim outputs so the payload stays small even on chatty commands.
       commandOutputs: state.artifacts.commandOutputs.map((o) =>
-        o.length > 1000 ? o.slice(0, 1000) + "…[truncated]" : o
+        o.length > 1000 ? o.slice(0, 1000) + "…[truncated]" : o,
       ),
     },
   };
@@ -250,7 +250,7 @@ async function judgeItemWithLLM(
     config,
     verifierSystemPrompt(),
     [{ role: "user", content: JSON.stringify(payload) }],
-    { signal }
+    { signal },
   );
 
   const jsonStr = content.match(/\{[\s\S]*\}/)?.[0] ?? content;
@@ -261,11 +261,17 @@ async function judgeItemWithLLM(
     };
     if (typeof parsed.complete === "boolean") {
       const missingEvidence = Array.isArray(parsed.missingEvidence)
-        ? parsed.missingEvidence.filter((x): x is string => typeof x === "string")
+        ? parsed.missingEvidence.filter(
+            (x): x is string => typeof x === "string",
+          )
         : [];
       return {
         complete: parsed.complete,
-        missing: parsed.complete ? [] : missingEvidence.length > 0 ? missingEvidence : ["acceptance criteria not yet met"],
+        missing: parsed.complete
+          ? []
+          : missingEvidence.length > 0
+            ? missingEvidence
+            : ["acceptance criteria not yet met"],
       };
     }
   } catch {

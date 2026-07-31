@@ -23,10 +23,11 @@ bun run src/cli.ts "implement a fizzbuzz function in TypeScript"
 
 ## Configure
 
-Copy `.harness.json.example` or create `.harness.json` at the project root:
+Create a versioned `.harness.json` at the project root:
 
 ```json
 {
+  "schemaVersion": 1,
   "planner": {
     "provider": "anthropic",
     "model": "claude-sonnet-4-20250514"
@@ -42,6 +43,21 @@ Copy `.harness.json.example` or create `.harness.json` at the project root:
     "baseUrl": "http://localhost:11434/v1"
   }
 }
+```
+
+Configuration is resolved once with this precedence (highest priority last):
+built-in defaults, `~/.config/coding-harness/config.json`, project
+`.harness.json`, `HARNESS_*` environment variables, and CLI overrides. Layers
+are deeply merged and the final result is strictly validated; unknown keys and
+invalid environment values are errors rather than silently falling back.
+
+Use `apiKeyEnv` on a model role to name a secret-bearing environment variable.
+The value is injected only in memory and is removed from the
+`.runs/<id>/config.resolved.json` snapshot.
+
+```bash
+harness config validate
+harness config show       # redacted values plus field-level provenance
 ```
 
 Or use environment variables:
@@ -61,6 +77,8 @@ export HARNESS_EXECUTOR_BASE_URL=http://localhost:11434/v1
 ```
 harness              Start interactive session
 harness --config     Show model configuration
+harness config show  Show resolved redacted config and provenance
+harness config validate  Validate configuration without starting a run
 harness --list       List recent runs
 harness --resume ID  Resume a previous run
 harness --help       Show this help

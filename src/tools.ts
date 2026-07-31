@@ -22,7 +22,11 @@ export const tools: ToolDefinition[] = [
     name: "read_file",
     description: "Read a file's contents",
     parameters: {
-      path: { type: "string", description: "File path to read", required: true },
+      path: {
+        type: "string",
+        description: "File path to read",
+        required: true,
+      },
     },
     execute: (args) => readFileTool(args as { path: string }),
   },
@@ -41,8 +45,7 @@ export const tools: ToolDefinition[] = [
         required: true,
       },
     },
-    execute: (args) =>
-      writeFileTool(args as { path: string; content: string }),
+    execute: (args) => writeFileTool(args as { path: string; content: string }),
   },
   {
     name: "edit_file",
@@ -142,7 +145,7 @@ export function toolsToPromptDescription(names?: string[]): string {
       const params = Object.entries(t.parameters)
         .map(
           ([name, p]) =>
-            `  - ${name} (${p.type}${p.required ? ", required" : ""}): ${p.description}`
+            `  - ${name} (${p.type}${p.required ? ", required" : ""}): ${p.description}`,
         )
         .join("\n");
       return `### ${t.name}\n${t.description}\n${params ? `Parameters:\n${params}` : "No parameters"}`;
@@ -152,7 +155,7 @@ export function toolsToPromptDescription(names?: string[]): string {
 
 export async function executeTool(
   name: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
 ): Promise<{ success: boolean; output: string }> {
   const tool = getToolByName(name);
   if (!tool) return { success: false, output: `Unknown tool: ${name}` };

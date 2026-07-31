@@ -1,4 +1,13 @@
 import { z } from "zod";
+export {
+  ProviderSchema,
+  RoleModelConfigSchema,
+  ResolvedConfigSchema,
+  type Provider,
+  type RoleModelConfig,
+  type ResolvedConfig,
+} from "./contracts/config.js";
+import { AssertionSchema, type Assertion } from "./contracts/plan.js";
 
 export const MessageSchema = z.object({
   role: z.enum(["user", "assistant", "tool"]),
@@ -10,7 +19,7 @@ export const MessageSchema = z.object({
         id: z.string(),
         name: z.string(),
         arguments: z.string(),
-      })
+      }),
     )
     .optional(),
 });
@@ -60,6 +69,7 @@ export const PlannerChecklistItemSchema = ChecklistItemSchema.extend({
   verificationKind: VerificationKindSchema.optional(),
   suggestedCommands: z.array(z.string()).optional(),
   dependencies: z.array(z.string()).optional(),
+  assertions: z.array(AssertionSchema).optional(),
 });
 
 export type PlannerChecklistItem = z.infer<typeof PlannerChecklistItemSchema>;
@@ -80,69 +90,6 @@ export const VerifierReportSchema = z.object({
 });
 
 export type VerifierReport = z.infer<typeof VerifierReportSchema>;
-
-export const ProviderSchema = z.enum([
-  "openai",
-  "anthropic",
-  "local",
-  "claude-code",
-]);
-export type Provider = z.infer<typeof ProviderSchema>;
-
-export const RoleModelConfigSchema = z.object({
-  provider: ProviderSchema,
-  model: z.string(),
-  baseUrl: z.string().optional(),
-  apiKey: z.string().optional(),
-  temperature: z.number().optional(),
-  maxTokens: z.number().optional(),
-  thinking: z
-    .object({
-      enabled: z.boolean(),
-      budgetTokens: z.number().optional(),
-    })
-    .optional(),
-  localOptions: z
-    .object({
-      supportsToolCalling: z.boolean().optional(),
-      supportsJsonMode: z.boolean().optional(),
-      maxTokens: z.number().optional(),
-    })
-    .optional(),
-  // Options for the "claude-code" provider, which shells out to the local
-  // `claude` CLI (using whatever auth the user already logged in with).
-  claudeCode: z
-    .object({
-      allowedTools: z.array(z.string()).optional(),
-      disallowedTools: z.array(z.string()).optional(),
-      dangerouslySkipPermissions: z.boolean().optional(),
-      // By default each spawned sub-`claude` is isolated from the user's global
-      // config: no inherited MCP servers (--strict-mcp-config) and only
-      // project/local settings (skips user-level SessionStart hooks). This
-      // avoids slow/hanging startup when the user has many MCP servers or
-      // auth-gated connectors configured. Set to false to inherit everything.
-      isolateConfig: z.boolean().optional(),
-      // Which setting sources the sub-`claude` loads. Defaults to
-      // ["project","local"] when isolateConfig !== false. Set explicitly to
-      // include "user" if a role genuinely needs user-level settings/hooks.
-      settingSources: z.array(z.enum(["user", "project", "local"])).optional(),
-    })
-    .optional(),
-});
-
-export type RoleModelConfig = z.infer<typeof RoleModelConfigSchema>;
-
-export const ModelConfigSchema = z.object({
-  planner: RoleModelConfigSchema,
-  executor: RoleModelConfigSchema,
-  verifier: RoleModelConfigSchema,
-  // Optional hard cap on the execute/verify loop. Omitted = no limit (the
-  // loop runs until the verifier reports done). Can also be set via the
-  // HARNESS_MAX_ITERATIONS env var or the --max-iterations CLI flag.
-  maxIterations: z.number().int().positive().optional(),
-});
-
-export type ModelConfig = z.infer<typeof ModelConfigSchema>;
 
 // Tool calling types
 export const ToolCallSchema = z.object({

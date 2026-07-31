@@ -13,10 +13,10 @@ import {
   loadEvents,
   type RunSummary,
 } from "../run-store.js";
-import type { ModelConfig, PlannerChecklistItem } from "../schemas.js";
+import type { ResolvedConfig, PlannerChecklistItem } from "../schemas.js";
 
 type AppProps = {
-  config: ModelConfig;
+  config: ResolvedConfig;
   initialPrompt?: string;
   resumeRunId?: string;
   resumePicker?: boolean;

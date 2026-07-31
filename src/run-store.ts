@@ -1,29 +1,25 @@
-import {
-  mkdir,
-  writeFile,
-  readFile,
-  readdir,
-  appendFile,
-} from "fs/promises";
+import { mkdir, writeFile, readFile, readdir, appendFile } from "fs/promises";
 import { join } from "path";
 import { HarnessStateSchema } from "./schemas.js";
-import type { HarnessState, ModelConfig, VerifierReport } from "./schemas.js";
+import type {
+  HarnessState,
+  ResolvedConfig,
+  VerifierReport,
+} from "./schemas.js";
 import type { HarnessEvent } from "./harness.js";
+import { redactConfig } from "./config.js";
 
 const RUNS_DIR = ".runs";
 
 export async function saveRunInit(
   state: HarnessState,
-  config: ModelConfig
+  config: ResolvedConfig,
 ): Promise<void> {
   const dir = join(RUNS_DIR, state.runId);
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, "prompt.md"), state.originalPrompt, "utf-8");
-  await writeFile(
-    join(dir, "config.json"),
-    JSON.stringify(config, null, 2),
-    "utf-8"
-  );
+  const redacted = JSON.stringify(redactConfig(config), null, 2);
+  await writeFile(join(dir, "config.resolved.json"), redacted, "utf-8");
 }
 
 export async function savePlanMarkdown(state: HarnessState): Promise<string> {
@@ -74,13 +70,13 @@ export async function savePlanMarkdown(state: HarnessState): Promise<string> {
       const vc = item.verifierConfig;
       lines.push("**Verifier Config:**");
       lines.push(
-        `- Required files: ${vc.requiredFiles?.join(", ") || "(none)"}`
+        `- Required files: ${vc.requiredFiles?.join(", ") || "(none)"}`,
       );
       lines.push(
-        `- Required commands: ${vc.requiredCommands?.join(", ") || "(none)"}`
+        `- Required commands: ${vc.requiredCommands?.join(", ") || "(none)"}`,
       );
       lines.push(
-        `- Forbidden patterns: ${vc.forbiddenPatterns?.join(", ") || "(none)"}`
+        `- Forbidden patterns: ${vc.forbiddenPatterns?.join(", ") || "(none)"}`,
       );
       lines.push("");
     }
@@ -98,24 +94,22 @@ export async function saveChecklist(state: HarnessState): Promise<void> {
   await writeFile(
     join(dir, "checklist.json"),
     JSON.stringify(state.checklist, null, 2),
-    "utf-8"
+    "utf-8",
   );
 }
 
-export async function saveStateCheckpoint(
-  state: HarnessState
-): Promise<void> {
+export async function saveStateCheckpoint(state: HarnessState): Promise<void> {
   const dir = join(RUNS_DIR, state.runId);
   await writeFile(
     join(dir, "state.json"),
     JSON.stringify(state, null, 2),
-    "utf-8"
+    "utf-8",
   );
 }
 
 export async function appendIteration(
   state: HarnessState,
-  iterationData: Record<string, unknown>
+  iterationData: Record<string, unknown>,
 ): Promise<void> {
   const dir = join(RUNS_DIR, state.runId);
   const line = JSON.stringify({
@@ -128,7 +122,7 @@ export async function appendIteration(
 
 export async function appendVerifierReport(
   state: HarnessState,
-  report: VerifierReport
+  report: VerifierReport,
 ): Promise<void> {
   const dir = join(RUNS_DIR, state.runId);
   const line = JSON.stringify({
@@ -136,17 +130,13 @@ export async function appendVerifierReport(
     timestamp: Date.now(),
     ...report,
   });
-  await appendFile(
-    join(dir, "verifier-reports.jsonl"),
-    line + "\n",
-    "utf-8"
-  );
+  await appendFile(join(dir, "verifier-reports.jsonl"), line + "\n", "utf-8");
 }
 
 export async function appendCommand(
   state: HarnessState,
   command: string,
-  output: string
+  output: string,
 ): Promise<void> {
   const dir = join(RUNS_DIR, state.runId);
   const line = JSON.stringify({
@@ -165,17 +155,14 @@ export async function appendCommand(
 // chain so concurrent emits can't interleave a half-written line.
 let eventAppendChain: Promise<void> = Promise.resolve();
 
-export function appendEvent(
-  runId: string,
-  event: HarnessEvent
-): Promise<void> {
+export function appendEvent(runId: string, event: HarnessEvent): Promise<void> {
   eventAppendChain = eventAppendChain
     .then(() =>
       appendFile(
         join(RUNS_DIR, runId, "events.jsonl"),
         JSON.stringify({ timestamp: Date.now(), event }) + "\n",
-        "utf-8"
-      )
+        "utf-8",
+      ),
     )
     .catch(() => {
       // Best-effort: a failed transcript append must never break the run.
@@ -185,10 +172,7 @@ export function appendEvent(
 
 export async function loadEvents(runId: string): Promise<HarnessEvent[]> {
   try {
-    const raw = await readFile(
-      join(RUNS_DIR, runId, "events.jsonl"),
-      "utf-8"
-    );
+    const raw = await readFile(join(RUNS_DIR, runId, "events.jsonl"), "utf-8");
     const events: HarnessEvent[] = [];
     for (const line of raw.split("\n")) {
       const trimmed = line.trim();
@@ -265,13 +249,13 @@ export async function listRunsDetailed(): Promise<RunSummary[]> {
     };
     try {
       const state = JSON.parse(
-        await readFile(join(dir, "state.json"), "utf-8")
+        await readFile(join(dir, "state.json"), "utf-8"),
       ) as HarnessState;
       summary.iteration = state.iteration;
       summary.maxIterations = state.maxIterations;
       summary.totalItems = state.checklist.length;
       summary.doneItems = state.checklist.filter(
-        (i) => i.status === "done"
+        (i) => i.status === "done",
       ).length;
       summary.hasState = true;
     } catch {
