@@ -11,17 +11,20 @@ function getRunsDir(): string {
 export type ChecklistItem = {
   id: string;
   description: string;
-  status: "pending" | "in_progress" | "done" | "failed";
+  status:
+    | "pending"
+    | "ready"
+    | "executing"
+    | "verifying"
+    | "passed"
+    | "retryable"
+    | "blocked"
+    | "failed"
+    | "skipped";
   acceptanceCriteria: string[];
   evidenceRequired: string[];
   evidenceFound: string[];
-  verifierConfig?: {
-    requiredCommands?: string[];
-    requiredFiles?: string[];
-    requiredPatterns?: string[];
-    forbiddenPatterns?: string[];
-    successIndicators?: string[];
-  };
+  assertions: Array<Record<string, unknown>>;
   suggestedCommands?: string[];
   dependencies?: string[];
 };
@@ -87,7 +90,7 @@ export async function listSessions(): Promise<Session[]> {
       session.checklist = (state.checklist as ChecklistItem[]) ?? [];
       session.totalItems = session.checklist.length;
       session.doneItems = session.checklist.filter(
-        (i) => i.status === "done",
+        (i) => i.status === "passed",
       ).length;
       session.startedAt = state.startedAt ?? 0;
     } catch {}
@@ -126,7 +129,7 @@ export async function getSession(id: string): Promise<Session | null> {
     session.checklist = (state.checklist as ChecklistItem[]) ?? [];
     session.totalItems = session.checklist.length;
     session.doneItems = session.checklist.filter(
-      (i) => i.status === "done",
+      (i) => i.status === "passed",
     ).length;
     session.startedAt = state.startedAt ?? 0;
   } catch {

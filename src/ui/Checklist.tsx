@@ -8,16 +8,26 @@ type ChecklistProps = {
 
 const STATUS_ICONS: Record<string, string> = {
   pending: "○",
-  in_progress: "◆",
-  done: "✓",
+  ready: "◇",
+  executing: "◆",
+  verifying: "◈",
+  passed: "✓",
+  retryable: "↻",
+  blocked: "⊘",
   failed: "✗",
+  skipped: "–",
 };
 
 const STATUS_COLORS: Record<string, string> = {
   pending: "gray",
-  in_progress: "yellow",
-  done: "green",
+  ready: "cyan",
+  executing: "yellow",
+  verifying: "blue",
+  passed: "green",
+  retryable: "yellow",
+  blocked: "red",
   failed: "red",
+  skipped: "gray",
 };
 
 export function Checklist({ items }: ChecklistProps) {

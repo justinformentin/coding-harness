@@ -29,7 +29,17 @@ export type Message = z.infer<typeof MessageSchema>;
 export const ChecklistItemSchema = z.object({
   id: z.string(),
   description: z.string(),
-  status: z.enum(["pending", "in_progress", "done", "failed"]),
+  status: z.enum([
+    "pending",
+    "ready",
+    "executing",
+    "verifying",
+    "passed",
+    "retryable",
+    "blocked",
+    "failed",
+    "skipped",
+  ]),
   acceptanceCriteria: z.array(z.string()),
   evidenceRequired: z.array(z.string()),
   evidenceFound: z.array(z.string()),
@@ -37,39 +47,10 @@ export const ChecklistItemSchema = z.object({
 
 export type ChecklistItem = z.infer<typeof ChecklistItemSchema>;
 
-export const VerifierConfigSchema = z.object({
-  requiredCommands: z.array(z.string()).optional(),
-  requiredFiles: z.array(z.string()).optional(),
-  requiredPatterns: z.array(z.string()).optional(),
-  forbiddenPatterns: z.array(z.string()).optional(),
-  successIndicators: z.array(z.string()).optional(),
-});
-
-export type VerifierConfig = z.infer<typeof VerifierConfigSchema>;
-
-// How an item should be verified once the executor has attempted it:
-//   - "deterministic": checked purely in code via verifierConfig (file exists,
-//     command ran, pattern present). No LLM involved.
-//   - "manual": success is subjective and can't be checked mechanically; we
-//     only confirm the work was attempted (the executor's finish claim) and
-//     defer any content judgment to a later human review.
-//   - "llm": genuinely needs semantic judgment now; verified per-item by the
-//     verifier model. Reserve for cases the other two can't cover.
-export const VerificationKindSchema = z.enum([
-  "deterministic",
-  "manual",
-  "llm",
-]);
-export type VerificationKind = z.infer<typeof VerificationKindSchema>;
-
 export const PlannerChecklistItemSchema = ChecklistItemSchema.extend({
-  verifierConfig: VerifierConfigSchema.optional(),
-  // Chosen by the planner. When omitted, the verifier infers it: deterministic
-  // if a non-empty verifierConfig is present, otherwise manual.
-  verificationKind: VerificationKindSchema.optional(),
   suggestedCommands: z.array(z.string()).optional(),
-  dependencies: z.array(z.string()).optional(),
-  assertions: z.array(AssertionSchema).optional(),
+  dependencies: z.array(z.string()).default([]),
+  assertions: z.array(AssertionSchema).min(1),
 });
 
 export type PlannerChecklistItem = z.infer<typeof PlannerChecklistItemSchema>;
@@ -168,6 +149,25 @@ export const HarnessStateSchema = z.object({
   maxIterations: z.number().optional(),
   runId: z.string(),
   startedAt: z.number(),
+  stepAttempts: z.record(z.number().int().nonnegative()).default({}),
+  modelCalls: z.number().int().nonnegative().default(0),
+  toolCalls: z.number().int().nonnegative().default(0),
+  noProgressCount: z.number().int().nonnegative().default(0),
+  progressFingerprint: z.string().optional(),
+  stopReason: z
+    .enum([
+      "completed",
+      "cancelled",
+      "max_attempts",
+      "max_model_calls",
+      "max_tool_calls",
+      "deadline",
+      "no_progress",
+      "blocked",
+      "fatal_error",
+    ])
+    .optional(),
+  reviewRequired: z.array(z.string()).default([]),
 });
 
 export type HarnessState = z.infer<typeof HarnessStateSchema>;

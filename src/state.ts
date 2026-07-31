@@ -18,6 +18,11 @@ export function createInitialState(
     maxIterations,
     runId: `${date}-${seq}`,
     startedAt: now,
+    stepAttempts: {},
+    modelCalls: 0,
+    toolCalls: 0,
+    noProgressCount: 0,
+    reviewRequired: [],
   };
 }
 
@@ -25,13 +30,13 @@ export function getNextPendingItem(
   state: HarnessState,
 ): PlannerChecklistItem | undefined {
   return state.checklist.find(
-    (item) => item.status === "pending" || item.status === "in_progress",
+    (item) => item.status === "pending" || item.status === "retryable",
   );
 }
 
 export function allItemsDone(state: HarnessState): boolean {
   return (
     state.checklist.length > 0 &&
-    state.checklist.every((item) => item.status === "done")
+    state.checklist.every((item) => item.status === "passed")
   );
 }

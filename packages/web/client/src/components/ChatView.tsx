@@ -59,6 +59,11 @@ function formatEvent(ev: HarnessEvent): Entry | null {
           ev.maxIterations ? `/${String(ev.maxIterations)}` : ""
         }`,
       };
+    case "step_transition":
+      return {
+        source: "system",
+        text: `${String(ev.stepId)}: ${String(ev.from)} → ${String(ev.to)}`,
+      };
     case "steering":
       return { source: "user", text: `Steering: ${String(ev.message)}` };
     case "executor_start":
@@ -118,6 +123,15 @@ function formatEvent(ev: HarnessEvent): Entry | null {
       return { source: "system", text: "Run stopped." };
     case "max_iterations":
       return { source: "error", text: "Max iterations reached." };
+    case "budget_exhausted":
+      return {
+        source: "error",
+        text: `Run stopped: ${String(ev.reason ?? "budget exhausted")}`,
+      };
+    case "blocked":
+      return { source: "error", text: "Run blocked by unmet dependencies." };
+    case "attempt_complete":
+      return null;
     case "error":
       return { source: "error", text: String(ev.message ?? "error") };
     default:

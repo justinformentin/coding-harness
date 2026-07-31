@@ -5,7 +5,7 @@ import { tmpdir } from "os";
 import { loadConfig } from "../src/config.js";
 import { parsePlannerOutput } from "../src/planner.js";
 import { parseToolCalls } from "../src/executor.js";
-import { verify } from "../src/verifier.js";
+import { verifyStepAssertions } from "../src/assertion-verifier.js";
 import { FileRunStore, loadEvents } from "../src/run-store.js";
 import { createInitialState } from "../src/state.js";
 import type { HarnessState, PlannerChecklistItem } from "../src/schemas.js";
@@ -32,10 +32,12 @@ function item(
   return {
     id: "step-1",
     description: "Create output",
-    status: "in_progress",
+    status: "executing",
     acceptanceCriteria: ["output exists"],
     evidenceRequired: ["file"],
     evidenceFound: [],
+    dependencies: [],
+    assertions: [{ kind: "file_exists", path: "output.txt" }],
     ...overrides,
   };
 }
@@ -103,37 +105,40 @@ describe("deterministic verification", () => {
     await writeFile("output.txt", "hello modern harness\n");
     const s = state([
       item({
-        verificationKind: "deterministic",
-        verifierConfig: {
-          requiredFiles: ["output.txt"],
-          requiredCommands: ["bun test"],
-          requiredPatterns: ["modern harness"],
-          forbiddenPatterns: ["FIXME"],
-          successIndicators: ["tests passed"],
-        },
+        assertions: [
+          { kind: "file_exists", path: "output.txt" },
+          {
+            kind: "file_matches",
+            path: "output.txt",
+            pattern: "modern harness",
+          },
+          { kind: "file_not_matches", path: "output.txt", pattern: "FIXME" },
+          {
+            kind: "command",
+            argv: [process.execPath, "-e", "console.log('tests passed')"],
+            exitCode: 0,
+          },
+          { kind: "stdout", from: "assertion:3", contains: "tests passed" },
+        ],
       }),
     ]);
-    s.artifacts = {
-      filesChanged: ["output.txt"],
-      commandsRun: ["bun test"],
-      commandOutputs: ["tests passed"],
-    };
-    const report = await verify(s, { provider: "local", model: "unused" });
-    expect(report.done).toBe(true);
+    const report = await verifyStepAssertions(s.checklist[0], s, dir);
+    expect(report.status).toBe("passed");
     await rm(dir, { recursive: true, force: true });
   });
 
   test("does not treat an executor claim as deterministic proof", async () => {
+    const dir = await tempWorkspace();
     const s = state([
       item({
-        verificationKind: "deterministic",
-        verifierConfig: { requiredFiles: ["missing.txt"] },
+        assertions: [{ kind: "file_exists", path: "missing.txt" }],
       }),
     ]);
     s.executorClaims.push("step-1");
-    const report = await verify(s, { provider: "local", model: "unused" });
-    expect(report.done).toBe(false);
-    expect(report.missingEvidence[0]).toContain("File not found");
+    const report = await verifyStepAssertions(s.checklist[0], s, dir);
+    expect(report.status).toBe("failed");
+    expect(report.failures[0]).toContain("missing");
+    await rm(dir, { recursive: true, force: true });
   });
 });
 
@@ -162,9 +167,21 @@ describe("event persistence", () => {
       second.append({ type: "plan_start", data: {} }),
     ]);
     await first.append({ type: "iteration_start", data: { iteration: 1 } });
+    await first.append({
+      type: "attempt_complete",
+      data: {
+        iteration: 1,
+        modelCalls: 2,
+        toolCalls: 3,
+        stepAttempts: { build: 1 },
+      },
+    });
     const projection = await first.replay();
-    expect(projection.lastSequence).toBe(1);
+    expect(projection.lastSequence).toBe(2);
     expect(projection.iteration).toBe(1);
+    expect(projection.modelCalls).toBe(2);
+    expect(projection.toolCalls).toBe(3);
+    expect(projection.stepAttempts).toEqual({ build: 1 });
     expect((await second.replay()).lastSequence).toBe(0);
     await first.writeCheckpoint(projection);
     expect(

@@ -8,8 +8,8 @@
       "acceptanceCriteria": ["greeting.txt exists"],
       "evidenceRequired": ["file contents"],
       "evidenceFound": [],
-      "verificationKind": "deterministic",
-      "verifierConfig": { "requiredFiles": ["greeting.txt"] }
+      "dependencies": [],
+      "assertions": [{ "kind": "file_exists", "path": "greeting.txt" }]
     }
   ]
 }

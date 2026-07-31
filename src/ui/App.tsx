@@ -191,6 +191,13 @@ export function App({
           setIteration(event.iteration);
           setMaxIter(event.maxIterations);
           break;
+        case "step_transition":
+          setChecklist((previous) =>
+            previous.map((item) =>
+              item.id === event.stepId ? { ...item, status: event.to } : item,
+            ),
+          );
+          break;
         case "steering":
           addLog("user", `Steering applied: ${event.message}`);
           break;
@@ -333,7 +340,7 @@ export function App({
             const updated = prev.map((item) => ({ ...item }));
             for (const id of event.report.completedItems) {
               const item = updated.find((i) => i.id === id);
-              if (item) item.status = "done";
+              if (item) item.status = "passed";
             }
             return updated;
           });
@@ -357,6 +364,23 @@ export function App({
             "error",
             `Max iterations reached. Run saved to .runs/${event.state.runId}`,
           );
+          break;
+        case "budget_exhausted":
+          setStatus("error");
+          addLog("error", `Run stopped: ${event.reason.replaceAll("_", " ")}`);
+          break;
+        case "blocked":
+          setStatus("error");
+          addLog(
+            "error",
+            "Run blocked because no step has satisfied dependencies",
+          );
+          break;
+        case "stopped":
+          setStatus("error");
+          addLog("system", "Run stopped");
+          break;
+        case "attempt_complete":
           break;
         case "error":
           setStatus("error");
@@ -450,6 +474,9 @@ export function App({
             "plan_review",
             "complete",
             "max_iterations",
+            "budget_exhausted",
+            "blocked",
+            "stopped",
             "error",
           ]);
           for (const ev of priorEvents) {
