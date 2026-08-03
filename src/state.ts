@@ -23,6 +23,8 @@ export function createInitialState(
     toolCalls: 0,
     noProgressCount: 0,
     reviewRequired: [],
+    stepMessages: {},
+    contextArtifacts: {},
   };
 }
 

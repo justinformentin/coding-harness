@@ -1,10 +1,9 @@
-import { chat, chatStreamWithSystem, extractToolArguments } from "./llm.js";
+import { chat, extractToolArguments } from "./llm.js";
 import { executorSystemPrompt, claudeCodeExecutorPrompt } from "./prompts.js";
-import { executeTool } from "./tools.js";
+import { executeTool, modelToolDefinitions } from "./tools.js";
 import {
   FINISH_TOOL_NAME,
   parseFinishCall,
-  normalizeStopReason,
   decideExecutorDone,
 } from "./completion.js";
 import { runClaudeCode, gitChangedFiles } from "./claude-code.js";
@@ -16,6 +15,14 @@ import type {
   RoleModelConfig,
 } from "./schemas.js";
 import { appendCommand } from "./run-store.js";
+import {
+  buildStepContext,
+  type ContextLimits,
+  truncateUtf8,
+} from "./context.js";
+import { randomUUID } from "crypto";
+import type { ModelTrace } from "./contracts/model.js";
+import type { ModelStopReason, ModelResult } from "./contracts/model.js";
 
 type ParsedToolCall = {
   name: string;
@@ -50,6 +57,19 @@ export type ExecutorCallbacks = {
   targetItemId?: string;
   maxModelCalls?: number;
   maxToolCalls?: number;
+  contextLimits?: ContextLimits;
+  onModelTrace?: (trace: ModelTrace) => void;
+  onToolTrace?: (trace: {
+    phase: "start" | "end";
+    spanId: string;
+    parentSpanId: string;
+    name: string;
+    success?: boolean;
+  }) => void;
+  onContextCompacted?: (input: {
+    stepId: string;
+    messages: Message[];
+  }) => Promise<string | undefined>;
 };
 
 // Safety cap on how many model turns one execute-to-completion pass may take on
@@ -160,7 +180,7 @@ async function executeTextToCompletion(
       toolCallCount: turn.toolCalls.filter((t) => t.name !== FINISH_TOOL_NAME)
         .length,
       finishCalled: Boolean(finish),
-      stopReason: normalizeStopReason(config.provider, turn.stopReason),
+      stopReason: turn.stopReason,
     });
     if (decision.done) break;
   }
@@ -175,61 +195,75 @@ async function executeTextTurn(
   state: HarnessState,
   config: RoleModelConfig,
   callbacks?: ExecutorCallbacks,
-): Promise<ExecutorResult & { stopReason: string | undefined }> {
+): Promise<ExecutorResult & { stopReason: ModelStopReason }> {
   const onToken = callbacks?.onToken;
   const systemPrompt = executorSystemPrompt(state);
-
-  // Build messages from state (already includes any prior conversation +
-  // tool results from earlier turns this pass).
-  const messages: Message[] = [...state.messages];
-
-  // Capture the provider's raw stop reason so the loop can tell a natural stop
-  // from a truncation (hit token cap → not actually done).
-  let stopReason: string | undefined;
-  const chatOptions = {
-    onFinish: (raw?: string) => {
-      stopReason = raw;
-    },
-    signal: callbacks?.signal,
+  const current = callbacks?.targetItemId
+    ? state.checklist.find((item) => item.id === callbacks.targetItemId)
+    : state.checklist.find((item) => item.status === "executing");
+  if (!current) throw new Error("Executor has no current step");
+  const limits = callbacks?.contextLimits ?? {
+    maxMessages: 40,
+    maxBytes: 200_000,
   };
-
-  let response: string;
-
-  if (onToken) {
-    // Streaming path: collect chunks and forward each token via the callback
-    const chunks: string[] = [];
-    for await (const chunk of chatStreamWithSystem(
-      config,
-      systemPrompt,
-      messages,
-      chatOptions,
-    )) {
-      chunks.push(chunk);
-      onToken(chunk);
+  let view = buildStepContext(state, current, limits);
+  if (view.compacted.length) {
+    const artifact = await callbacks?.onContextCompacted?.({
+      stepId: current.id,
+      messages: view.compacted,
+    });
+    state.stepMessages[current.id] = view.retainedHistory;
+    if (artifact) {
+      const artifacts = (state.contextArtifacts[current.id] ??= []);
+      if (!artifacts.includes(artifact)) artifacts.push(artifact);
     }
-    response = chunks.join("");
-  } else {
-    // Non-streaming path (fallback when no onToken provided)
-    const chatResponse = await chat(
-      config,
-      systemPrompt,
-      messages,
-      chatOptions,
-    );
-    response = chatResponse.content;
+    view = buildStepContext(state, current, limits);
   }
 
-  // Parse tool calls from response text (freeform ```tool blocks)
-  const toolCalls = parseToolCalls(response);
+  const modelResult = await chat(config, systemPrompt, view.messages, {
+    tools: modelToolDefinitions(),
+    onToken,
+    onTrace: callbacks?.onModelTrace,
+    onToolTrace: callbacks?.onToolTrace,
+    signal: callbacks?.signal,
+  });
+  const response = modelResult.text;
+  const toolCalls = modelResult.toolCalls.map((call) => ({
+    name: call.name,
+    arguments: call.arguments,
+  }));
   const toolResults: ExecutorResult["toolResults"] = [];
 
   // Execute tool calls
   for (const tc of toolCalls) {
-    // `finish` is a sentinel with no side effect — the loop reads it to decide
-    // when to stop, but there's nothing to execute.
-    if (tc.name === FINISH_TOOL_NAME) continue;
     callbacks?.onToolUse?.({ name: tc.name, input: tc.arguments });
+    const spanId = randomUUID();
+    callbacks?.onToolTrace?.({
+      phase: "start",
+      spanId,
+      parentSpanId: modelResult.spanId,
+      name: tc.name,
+    });
+    // `finish` is a sentinel with no side effect, but it is still traced as a
+    // complete tool operation so every observed call has a matching span.
+    if (tc.name === FINISH_TOOL_NAME) {
+      callbacks?.onToolTrace?.({
+        phase: "end",
+        spanId,
+        parentSpanId: modelResult.spanId,
+        name: tc.name,
+        success: true,
+      });
+      continue;
+    }
     const result = await executeTool(tc.name, tc.arguments);
+    callbacks?.onToolTrace?.({
+      phase: "end",
+      spanId,
+      parentSpanId: modelResult.spanId,
+      name: tc.name,
+      success: result.success,
+    });
     toolResults.push({
       name: tc.name,
       output: result.output,
@@ -260,12 +294,23 @@ async function executeTextTurn(
       : "";
 
   // Update messages
-  state.messages.push({ role: "assistant", content: response });
+  const stepHistory = (state.stepMessages[current.id] ??= []);
+  stepHistory.push({ role: "assistant", content: response });
   if (toolOutputStr) {
-    state.messages.push({ role: "tool", content: toolOutputStr });
+    stepHistory.push({ role: "tool", content: toolOutputStr });
   }
+  state.messages.push({
+    role: "assistant",
+    content: `[${current.id}] ${truncateUtf8(response, 1000)}`,
+  });
 
-  return { response, toolCalls, toolResults, modelCalls: 1, stopReason };
+  return {
+    response,
+    toolCalls,
+    toolResults,
+    modelCalls: 1,
+    stopReason: modelResult.stopReason,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -342,8 +387,21 @@ async function executeItemWithClaudeCode(
   item.status = "executing";
 
   const prompt = claudeCodeExecutorPrompt(state, item);
+  const boundedPrompt = truncateUtf8(
+    prompt,
+    callbacks?.contextLimits?.maxBytes ?? 200_000,
+  );
   const before = new Set(gitChangedFiles());
   const toolCalls: ParsedToolCall[] = [];
+  const modelSpanId = randomUUID();
+  const modelStartedAt = Date.now();
+  callbacks?.onModelTrace?.({
+    phase: "start",
+    spanId: modelSpanId,
+    provider: config.provider,
+    model: config.model,
+    attempt: 1,
+  });
 
   // If a prior sub-Claude already worked this item (a repair pass, or a resumed
   // run after the harness was interrupted mid-item), continue its own session
@@ -352,26 +410,75 @@ async function executeItemWithClaudeCode(
   const sessions = (state.claudeSessions ??= {});
   const resumeSessionId = sessions[item.id];
 
-  const result = await runClaudeCode({
-    prompt,
+  let result;
+  try {
+    result = await runClaudeCode({
+      prompt: boundedPrompt,
+      model: config.model,
+      allowedTools: config.claudeCode?.allowedTools,
+      disallowedTools: config.claudeCode?.disallowedTools,
+      // The executor must edit files and run commands unattended.
+      dangerouslySkipPermissions:
+        config.claudeCode?.dangerouslySkipPermissions ?? true,
+      isolateConfig: config.claudeCode?.isolateConfig,
+      settingSources: config.claudeCode?.settingSources,
+      resumeSessionId,
+      signal: callbacks?.signal,
+      onToken,
+      onToolUse: (use) => {
+        toolCalls.push({
+          name: use.name,
+          arguments: (use.input as Record<string, unknown>) ?? {},
+        });
+        callbacks?.onToolUse?.({ name: use.name, input: use.input });
+        const toolSpanId = randomUUID();
+        callbacks?.onToolTrace?.({
+          phase: "start",
+          spanId: toolSpanId,
+          parentSpanId: modelSpanId,
+          name: use.name,
+        });
+        callbacks?.onToolTrace?.({
+          phase: "end",
+          spanId: toolSpanId,
+          parentSpanId: modelSpanId,
+          name: use.name,
+          success: true,
+        });
+      },
+    });
+  } catch (error) {
+    callbacks?.onModelTrace?.({
+      phase: "end",
+      spanId: modelSpanId,
+      provider: config.provider,
+      model: config.model,
+      attempt: 1,
+      durationMs: Date.now() - modelStartedAt,
+      error: {
+        kind: "unknown",
+        message: error instanceof Error ? error.message : String(error),
+      },
+    });
+    throw error;
+  }
+  const normalized: ModelResult = {
+    text: result.text,
+    toolCalls: [],
+    usage: {},
+    stopReason: "stop",
+    provider: config.provider,
     model: config.model,
-    allowedTools: config.claudeCode?.allowedTools,
-    disallowedTools: config.claudeCode?.disallowedTools,
-    // The executor must edit files and run commands unattended.
-    dangerouslySkipPermissions:
-      config.claudeCode?.dangerouslySkipPermissions ?? true,
-    isolateConfig: config.claudeCode?.isolateConfig,
-    settingSources: config.claudeCode?.settingSources,
-    resumeSessionId,
-    signal: callbacks?.signal,
-    onToken,
-    onToolUse: (use) => {
-      toolCalls.push({
-        name: use.name,
-        arguments: (use.input as Record<string, unknown>) ?? {},
-      });
-      callbacks?.onToolUse?.({ name: use.name, input: use.input });
-    },
+    spanId: modelSpanId,
+  };
+  callbacks?.onModelTrace?.({
+    phase: "end",
+    spanId: modelSpanId,
+    provider: config.provider,
+    model: config.model,
+    attempt: 1,
+    durationMs: Date.now() - modelStartedAt,
+    result: normalized,
   });
 
   // Remember this item's session so a later repair/resume pass can continue it.

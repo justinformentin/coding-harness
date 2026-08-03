@@ -44,9 +44,10 @@ ${toolSection}
 Each item is verified after the executor attempts it. Design every item around source-bound assertions:
 
 - Prefer exact argv commands and path-specific file checks.
-- Use "human_review" only when completion is genuinely subjective. It never counts as a deterministic pass and the final result remains awaiting review.
+- Use "model_judge" only for semantic criteria that deterministic assertions cannot express. Cite explicit file:path or command:index evidence IDs.
+- Use "human_review" only when neither deterministic checks nor a rubric can decide completion. It never counts as a deterministic pass and the final result remains awaiting review.
 
-Most items should be "deterministic". Only fall back to "manual" or "llm" when you truly cannot express a code check.
+Most items should use deterministic assertions. Model judgment is lower-confidence evidence, not a replacement for tests.
 
 Return ONLY valid JSON matching this schema:
 {
@@ -63,7 +64,8 @@ Return ONLY valid JSON matching this schema:
         {"kind": "file_exists", "path": "relative/path"},
         {"kind": "file_matches", "path": "relative/path", "pattern": "regex"},
         {"kind": "command", "argv": ["bun", "test"], "exitCode": 0},
-        {"kind": "stdout", "from": "assertion:2", "contains": "pass"}
+        {"kind": "stdout", "from": "assertion:2", "contains": "pass"},
+        {"kind": "model_judge", "rubric": "semantic rubric", "evidenceIds": ["file:relative/path"]}
       ],
       "suggestedCommands": ["optional — commands the executor should try"],
       "dependencies": ["optional — ids of items that must complete first"]

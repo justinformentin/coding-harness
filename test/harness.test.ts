@@ -188,6 +188,41 @@ describe("fake-provider harness scenarios", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
+  test("persists evidence-linked model judgments as lower confidence", async () => {
+    const dir = await workspace();
+    const judgedItem = {
+      ...structuredClone(plannedItem),
+      assertions: [
+        {
+          kind: "model_judge" as const,
+          rubric: "The output is clear",
+          evidenceIds: ["command:0"],
+        },
+      ],
+    };
+    const provider = fakeProvider([
+      JSON.stringify({ goal: "judge output", checklist: [judgedItem] }),
+      '```tool\n{"name":"run_command","arguments":{"command":"echo clear-output"}}\n```\n```tool\n{"name":"finish","completedItems":["write-greeting"]}\n```',
+      '{"passed":true,"rationale":"The output is clear","evidenceIds":["command:0"]}',
+    ]);
+    const state = await runHarness("Judge output", provider.config, () => {});
+    expect(state.verifierReport?.assertionResults[0]).toMatchObject({
+      kind: "model_judge",
+      status: "passed",
+      confidence: "model",
+      evidenceIds: ["command:0"],
+    });
+    const verification = (await loadEvents(state.runId)).find(
+      (event) => event.type === "verify_complete",
+    );
+    expect(
+      verification?.type === "verify_complete"
+        ? verification.report.assertionResults[0]?.confidence
+        : undefined,
+    ).toBe("model");
+    await rm(dir, { recursive: true, force: true });
+  });
+
   test("completes a deterministic task end to end", async () => {
     const dir = await workspace();
     const provider = fakeProvider([
@@ -207,6 +242,84 @@ describe("fake-provider harness scenarios", () => {
     expect(events.at(-1)?.type).toBe("complete");
     expect(provider.requests()).toBe(2);
     expect((await loadEvents(state.runId)).at(-1)?.type).toBe("complete");
+    const durable = await new FileRunStore(state.runId).readEvents();
+    const modelStarts = durable.filter(
+      (event) => event.type === "model_call_start",
+    );
+    const modelEnds = durable.filter(
+      (event) => event.type === "model_call_end",
+    );
+    const toolStarts = durable.filter(
+      (event) => event.type === "tool_call_start",
+    );
+    const toolEnds = durable.filter((event) => event.type === "tool_call_end");
+    expect(modelStarts.map((event) => event.spanId).sort()).toEqual(
+      modelEnds.map((event) => event.spanId).sort(),
+    );
+    expect(toolStarts.map((event) => event.spanId).sort()).toEqual(
+      toolEnds.map((event) => event.spanId).sort(),
+    );
+    expect(toolStarts.every((event) => Boolean(event.parentSpanId))).toBe(true);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("persists failed planner parses as artifacts before bounded repair", async () => {
+    const dir = await workspace();
+    const provider = fakeProvider([
+      `Here is the plan: ${plannerResponse}`,
+      plannerResponse,
+      '```tool\n{"name":"write_file","arguments":{"path":"greeting.txt","content":"hello"}}\n```\n```tool\n{"name":"finish","completedItems":["write-greeting"]}\n```',
+    ]);
+    const state = await runHarness(
+      "Create a greeting",
+      provider.config,
+      () => {},
+    );
+    const events = await loadEvents(state.runId);
+    const failure = events.find((event) => event.type === "parse_failure");
+    expect(failure).toMatchObject({
+      type: "parse_failure",
+      role: "planner",
+      parseAttempt: 1,
+    });
+    if (failure?.type === "parse_failure")
+      expect(
+        await readFile(
+          join(".runs", state.runId, "artifacts", failure.artifact),
+          "utf8",
+        ),
+      ).toContain("Here is the plan");
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("persists explicit context compaction with an artifact link", async () => {
+    const dir = await workspace();
+    const provider = fakeProvider([
+      plannerResponse,
+      '```tool\n{"name":"write_file","arguments":{"path":"scratch.txt","content":"temporary"}}\n```',
+      '```tool\n{"name":"write_file","arguments":{"path":"greeting.txt","content":"done"}}\n```\n```tool\n{"name":"finish","completedItems":["write-greeting"]}\n```',
+    ]);
+    provider.config.context = { maxMessages: 2, maxBytes: 800 };
+    const state = await runHarness(
+      "Create a greeting",
+      provider.config,
+      () => {},
+    );
+    const event = (await loadEvents(state.runId)).find(
+      (candidate) => candidate.type === "context_compacted",
+    );
+    expect(event?.type).toBe("context_compacted");
+    if (event?.type === "context_compacted") {
+      expect(state.contextArtifacts["write-greeting"]).toContain(
+        event.artifact,
+      );
+      expect(
+        await readFile(
+          join(".runs", state.runId, "artifacts", event.artifact),
+          "utf8",
+        ),
+      ).toContain("scratch.txt");
+    }
     await rm(dir, { recursive: true, force: true });
   });
 

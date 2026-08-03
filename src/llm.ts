@@ -1,74 +1,70 @@
+import { randomUUID } from "crypto";
 import type {
   Message,
   RoleModelConfig,
   ChatOptions,
-  ChatResponse,
-  ToolCall,
   ToolDefinition,
+  ModelResult,
+  ModelToolCall,
+  ModelUsage,
 } from "./schemas.js";
 import { runClaudeCode } from "./claude-code.js";
-import { debug } from "./debug.js";
+import { normalizeStopReason } from "./completion.js";
+import {
+  classifyModelError,
+  ModelError,
+  modelErrorForResponse,
+  retryModelCall,
+} from "./model-retry.js";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Internal message types
-// ─────────────────────────────────────────────────────────────────────────────
-
-type LLMMessage = {
-  role: "user" | "assistant" | "system";
-  content: string;
+type LLMMessage = { role: "user" | "assistant" | "system"; content: string };
+type RawResult = {
+  text: string;
+  toolCalls: ModelToolCall[];
+  usage: ModelUsage;
+  rawStopReason?: string;
 };
 
 function convertMessages(messages: Message[]): LLMMessage[] {
-  return messages.map((m) => ({
-    role:
-      m.role === "tool" ? ("user" as const) : (m.role as "user" | "assistant"),
-    content: m.role === "tool" ? `[Tool Result]\n${m.content}` : m.content,
+  return messages.map((message) => ({
+    role: message.role === "tool" ? "user" : message.role,
+    content:
+      message.role === "tool"
+        ? `[Tool Result]\n${message.content}`
+        : message.content,
   }));
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SSE parsing utilities
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Parse a Server-Sent Events stream from a Response body.
- * Yields each `data:` line's content (already stripped of the "data: " prefix).
- */
-async function* parseSSE(response: Response): AsyncGenerator<string> {
-  if (!response.body) throw new Error("Response body is null");
-
+async function* parseSSE(
+  response: Response,
+): AsyncGenerator<{ event?: string; data: string }> {
+  if (!response.body)
+    throw new ModelError("Response body is null", "transient");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-
       buffer += decoder.decode(value, { stream: true });
-
-      // Split by double-newline (SSE event separator)
-      const events = buffer.split(/\n\n/);
-      // Keep incomplete trailing event in buffer
-      buffer = events.pop() ?? "";
-
-      for (const event of events) {
-        // Each event may have multiple lines; find data: lines
-        for (const line of event.split("\n")) {
-          if (line.startsWith("data: ")) {
-            yield line.slice(6);
-          }
+      const blocks = buffer.split(/\r?\n\r?\n/);
+      buffer = blocks.pop() ?? "";
+      for (const block of blocks) {
+        let event: string | undefined;
+        for (const line of block.split(/\r?\n/)) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          if (line.startsWith("data:"))
+            yield { event, data: line.slice(5).trimStart() };
         }
       }
     }
-
-    // Flush any remaining buffer
     if (buffer.trim()) {
-      for (const line of buffer.split("\n")) {
-        if (line.startsWith("data: ")) {
-          yield line.slice(6);
-        }
+      let event: string | undefined;
+      for (const line of buffer.split(/\r?\n/)) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        if (line.startsWith("data:"))
+          yield { event, data: line.slice(5).trimStart() };
       }
     }
   } finally {
@@ -76,437 +72,343 @@ async function* parseSSE(response: Response): AsyncGenerator<string> {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// OpenAI-compatible streaming
-//
-// This path handles:
-//   - provider: "openai"  → https://api.openai.com/v1
-//   - provider: "local"   → OpenAI-compatible endpoint (Ollama, LM Studio,
-//                           vLLM, llama.cpp, etc.) at a user-supplied baseUrl.
-//                           No auth required; just point baseUrl at the server.
-// ─────────────────────────────────────────────────────────────────────────────
+function toolDefinitions(
+  tools: ToolDefinition[] | undefined,
+  anthropic = false,
+) {
+  return tools?.map((tool) =>
+    anthropic
+      ? {
+          name: tool.name,
+          description: tool.description,
+          input_schema: tool.parameters,
+        }
+      : {
+          type: "function",
+          function: {
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.parameters,
+          },
+        },
+  );
+}
 
-async function* chatStreamOpenAI(
+function parseArguments(value: string): Record<string, unknown> {
+  if (!value.trim()) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return { _malformed: value };
+  }
+}
+
+/** Compatibility adapter for models without native tool calling. */
+export function parseToolCallsFromText(text: string): ModelToolCall[] {
+  const calls: ModelToolCall[] = [];
+  for (const match of text.matchAll(/```tool\s*\n?([\s\S]*?)\n?```/g)) {
+    try {
+      const parsed = JSON.parse(match[1].trim()) as Record<string, unknown>;
+      if (typeof parsed.name === "string")
+        calls.push({
+          id: `compat_${calls.length}`,
+          name: parsed.name,
+          arguments: extractToolArguments(parsed),
+        });
+    } catch {
+      // Invalid compatibility blocks are ignored; structured-output callers
+      // persist parse failures at their contract boundary.
+    }
+  }
+  return calls;
+}
+
+export function extractToolArguments(
+  parsed: Record<string, unknown>,
+): Record<string, unknown> {
+  if (parsed.arguments && typeof parsed.arguments === "object")
+    return parsed.arguments as Record<string, unknown>;
+  const { name: _name, arguments: _arguments, ...rest } = parsed;
+  return rest;
+}
+
+async function completeOpenAI(
   config: RoleModelConfig,
   systemPrompt: string,
   messages: Message[],
-  options: ChatOptions = {},
-): AsyncGenerator<string> {
-  const isLocal = config.provider === "local";
-
-  // Local provider requires an explicit baseUrl — no defaults.
-  if (isLocal && !config.baseUrl) {
-    throw new Error(
-      "Local provider requires a baseUrl (e.g. http://localhost:11434/v1 for Ollama, http://localhost:1234/v1 for LM Studio)",
-    );
-  }
-
+  options: ChatOptions,
+): Promise<RawResult> {
+  const local = config.provider === "local";
+  if (local && !config.baseUrl)
+    throw new ModelError("Local provider requires a baseUrl", "policy");
   const baseUrl = config.baseUrl || "https://api.openai.com/v1";
-  const apiKey =
-    config.apiKey ||
-    (config.provider === "openai" ? process.env.OPENAI_API_KEY : undefined);
-
+  const apiKey = config.apiKey || process.env.OPENAI_API_KEY;
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
-  if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
-
-  const llmMessages: LLMMessage[] = [
-    { role: "system", content: systemPrompt },
-    ...convertMessages(messages),
-  ];
-
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
   const body: Record<string, unknown> = {
     model: config.model,
-    messages: llmMessages,
+    messages: [
+      { role: "system", content: systemPrompt },
+      ...convertMessages(messages),
+    ],
     temperature: options.temperature ?? config.temperature ?? 0.2,
     stream: true,
   };
-
-  if (isLocal) {
-    // Local models: only send max_tokens if explicitly configured
-    const localMaxTokens =
-      options.maxTokens ?? config.localOptions?.maxTokens ?? config.maxTokens;
-    if (localMaxTokens !== undefined) {
-      body.max_tokens = localMaxTokens;
-    }
-
-    // response_format only if json mode is explicitly supported
-    if (options.responseFormat && config.localOptions?.supportsJsonMode) {
-      body.response_format = { type: options.responseFormat };
-    }
-
-    // Tool calling only if explicitly supported
-    if (
-      options.tools &&
-      options.tools.length > 0 &&
-      config.localOptions?.supportsToolCalling
-    ) {
-      body.tools = options.tools.map((t: ToolDefinition) => ({
-        type: "function",
-        function: {
-          name: t.name,
-          description: t.description,
-          parameters: t.parameters,
-        },
-      }));
-      // Do NOT send tool_choice — most local servers don't support it
-    }
-  } else {
-    // OpenAI: only send max_tokens if explicitly configured; OpenAI has
-    // sensible defaults and we shouldn't impose an arbitrary cap.
-    const maxTokens = options.maxTokens ?? config.maxTokens;
-    if (maxTokens !== undefined) {
-      body.max_tokens = maxTokens;
-    }
-
-    if (options.responseFormat) {
-      body.response_format = { type: options.responseFormat };
-    }
-
-    if (options.tools && options.tools.length > 0) {
-      body.tools = options.tools.map((t: ToolDefinition) => ({
-        type: "function",
-        function: {
-          name: t.name,
-          description: t.description,
-          parameters: t.parameters,
-        },
-      }));
-      body.tool_choice = "auto";
-    }
+  if (!local) body.stream_options = { include_usage: true };
+  const maxTokens =
+    options.maxTokens ?? config.localOptions?.maxTokens ?? config.maxTokens;
+  if (maxTokens !== undefined) body.max_tokens = maxTokens;
+  if (
+    options.responseFormat &&
+    (!local || config.localOptions?.supportsJsonMode)
+  )
+    body.response_format = { type: options.responseFormat };
+  if (
+    options.tools?.length &&
+    (!local || config.localOptions?.supportsToolCalling)
+  ) {
+    body.tools = toolDefinitions(options.tools);
+    if (!local) body.tool_choice = "auto";
   }
 
-  const controller = new AbortController();
-  const signal = options.signal
-    ? combineSignals(options.signal, controller.signal)
-    : controller.signal;
-
-  debug("llm", "openai-compatible fetch → start", {
-    provider: config.provider,
-    model: config.model,
-    url: `${baseUrl}/chat/completions`,
-  });
   let response: Response;
   try {
     response = await fetch(`${baseUrl}/chat/completions`, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
-      signal,
+      signal: options.signal,
     });
-    debug("llm", "openai-compatible fetch → response headers received", {
-      status: response.status,
-      ok: response.ok,
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (
-      isLocal &&
-      (msg.includes("ECONNREFUSED") || msg.includes("fetch failed"))
-    ) {
-      throw new Error(
-        `Could not connect to local model server at ${baseUrl}. Is the server running? (${msg})`,
-      );
-    }
-    throw err;
+  } catch (error) {
+    throw classifyModelError(error);
   }
-
-  if (!response.ok) {
-    const text = await response.text();
-    if (isLocal) {
-      // Try to surface helpful hints for common local model errors
-      const lower = text.toLowerCase();
-      if (lower.includes("max_tokens") || lower.includes("maximum")) {
-        throw new Error(
-          `Local model error [${config.model}] (${response.status}): ${text}\nHint: Try removing or lowering maxTokens / localOptions.maxTokens in your config.`,
-        );
-      }
-      if (lower.includes("tool") || lower.includes("function")) {
-        throw new Error(
-          `Local model error [${config.model}] (${response.status}): ${text}\nHint: This model may not support tool calling. Set localOptions.supportsToolCalling: false in your config.`,
-        );
-      }
-      if (lower.includes("response_format") || lower.includes("json")) {
-        throw new Error(
-          `Local model error [${config.model}] (${response.status}): ${text}\nHint: This model may not support JSON mode. Set localOptions.supportsJsonMode: false in your config.`,
-        );
-      }
-    }
-    throw new Error(
-      `OpenAI-compatible request failed [${config.provider}/${config.model}] (${response.status}): ${text}`,
+  if (!response.ok)
+    throw modelErrorForResponse(
+      config.provider,
+      config.model,
+      response.status,
+      await response.text(),
     );
-  }
 
-  // OpenAI SSE format:
-  //   data: {"choices":[{"delta":{"content":"token"}}]}
-  //   data: [DONE]
-  // The last non-empty chunk carries finish_reason ("stop" | "length" |
-  // "tool_calls" | ...); we remember it and report it via onFinish at the end.
-  let finishReason: string | undefined;
-  for await (const line of parseSSE(response)) {
-    if (line === "[DONE]") break;
-    if (!line.trim()) continue;
-
-    try {
-      const parsed = JSON.parse(line) as {
-        choices?: Array<{
-          delta?: {
-            content?: string | null;
-            tool_calls?: Array<{
-              index: number;
-              id?: string;
-              function?: { name?: string; arguments?: string };
-            }>;
-          };
-          finish_reason?: string;
-        }>;
+  let text = "";
+  let rawStopReason: string | undefined;
+  let usage: ModelUsage = {};
+  const native = new Map<
+    number,
+    { id: string; name: string; arguments: string }
+  >();
+  for await (const item of parseSSE(response)) {
+    if (item.data === "[DONE]") break;
+    if (!item.data) continue;
+    let parsed: {
+      choices?: Array<{
+        delta?: {
+          content?: string | null;
+          tool_calls?: Array<{
+            index: number;
+            id?: string;
+            function?: { name?: string; arguments?: string };
+          }>;
+        };
+        finish_reason?: string | null;
+      }>;
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        total_tokens?: number;
       };
-
-      const choice = parsed.choices?.[0];
-      if (choice?.finish_reason) finishReason = choice.finish_reason;
-      const delta = choice?.delta;
-      if (delta?.content) {
-        yield delta.content;
-      }
-      // Note: tool_call deltas are NOT yielded as text — they are accumulated
-      // in chat() which wraps this generator and parses tool calls from the
-      // full response text (or via native tool_calls in the final message).
+    };
+    try {
+      parsed = JSON.parse(item.data);
     } catch {
-      // Ignore malformed SSE lines
+      continue;
+    }
+    if (parsed.usage)
+      usage = {
+        inputTokens: parsed.usage.prompt_tokens,
+        outputTokens: parsed.usage.completion_tokens,
+        totalTokens: parsed.usage.total_tokens,
+      };
+    const choice = parsed.choices?.[0];
+    if (choice?.finish_reason) rawStopReason = choice.finish_reason;
+    if (choice?.delta?.content) {
+      text += choice.delta.content;
+      options.onToken?.(choice.delta.content);
+    }
+    for (const delta of choice?.delta?.tool_calls ?? []) {
+      const current = native.get(delta.index) ?? {
+        id: delta.id ?? `call_${delta.index}`,
+        name: "",
+        arguments: "",
+      };
+      if (delta.id) current.id = delta.id;
+      if (delta.function?.name) current.name += delta.function.name;
+      if (delta.function?.arguments)
+        current.arguments += delta.function.arguments;
+      native.set(delta.index, current);
     }
   }
-  debug("llm", "openai-compatible stream → ended", { finishReason });
-  options.onFinish?.(finishReason);
+  const toolCalls = [...native.values()]
+    .filter((call) => call.name)
+    .map((call) => ({
+      id: call.id,
+      name: call.name,
+      arguments: parseArguments(call.arguments),
+    }));
+  return {
+    text,
+    toolCalls: toolCalls.length ? toolCalls : parseToolCallsFromText(text),
+    usage,
+    rawStopReason,
+  };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Anthropic streaming
-//
-// Anthropic uses SSE with named events. The relevant events are:
-//   event: content_block_delta
-//   data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
-//
-//   event: message_stop   ← signals end of stream
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function* chatStreamAnthropic(
+async function completeAnthropic(
   config: RoleModelConfig,
   systemPrompt: string,
   messages: Message[],
-  options: ChatOptions = {},
-): AsyncGenerator<string> {
-  const baseUrl = config.baseUrl || "https://api.anthropic.com";
+  options: ChatOptions,
+): Promise<RawResult> {
   const apiKey = config.apiKey || process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      `ANTHROPIC_API_KEY is required for Anthropic provider [model: ${config.model}]`,
-    );
-  }
-
-  const anthropicMessages = convertMessages(messages).filter(
-    (m) => m.role !== "system",
-  );
-
-  // Resolve thinking config: options take precedence over config-level setting
-  const thinkingOpts = options.thinking ?? config.thinking;
-  const thinkingEnabled = thinkingOpts?.enabled === true;
-  const budgetTokens = thinkingOpts?.budgetTokens ?? 10000;
-
-  // max_tokens must cover both thinking tokens and output tokens
-  const maxTokens =
-    options.maxTokens ??
-    config.maxTokens ??
-    (thinkingEnabled ? budgetTokens + 8192 : 16000);
-
+  if (!apiKey)
+    throw new ModelError("ANTHROPIC_API_KEY is required", "authentication");
+  const thinking = options.thinking ?? config.thinking;
+  const budget = thinking?.budgetTokens ?? 10_000;
   const body: Record<string, unknown> = {
     model: config.model,
-    max_tokens: maxTokens,
+    max_tokens:
+      options.maxTokens ??
+      config.maxTokens ??
+      (thinking?.enabled ? budget + 8192 : 16000),
     system: systemPrompt,
-    messages: anthropicMessages,
+    messages: convertMessages(messages).filter(
+      (message) => message.role !== "system",
+    ),
     stream: true,
+    temperature: thinking?.enabled
+      ? 1
+      : (options.temperature ?? config.temperature ?? 0.2),
   };
-
-  if (thinkingEnabled) {
-    // Extended thinking requires temperature=1 (Anthropic requirement)
-    body.thinking = {
-      type: "enabled",
-      budget_tokens: budgetTokens,
-    };
-    body.temperature = 1;
-  } else {
-    body.temperature = options.temperature ?? config.temperature ?? 0.2;
-  }
-
-  // Anthropic native tool definitions
-  if (options.tools && options.tools.length > 0) {
-    body.tools = options.tools.map((t: ToolDefinition) => ({
-      name: t.name,
-      description: t.description,
-      input_schema: t.parameters,
-    }));
-  }
-
-  debug("llm", "anthropic fetch → start", {
-    model: config.model,
-    url: `${baseUrl}/v1/messages`,
-    thinkingEnabled,
-    maxTokens,
-  });
-  const response = await fetch(`${baseUrl}/v1/messages`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify(body),
-    signal: options.signal,
-  });
-  debug("llm", "anthropic fetch → response headers received", {
-    status: response.status,
-    ok: response.ok,
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(
-      `Anthropic request failed [model: ${config.model}] (${response.status}): ${text}`,
-    );
-  }
-
-  // Anthropic SSE format: each event is a pair of lines:
-  //   event: <event_type>
-  //   data: <json>
-  //
-  // We parse the raw SSE and look for content_block_delta events.
-  // When extended thinking is enabled, the stream will also contain:
-  //   - content_block_start with type "thinking" (we track but don't yield)
-  //   - content_block_delta with type "thinking_delta" (we skip)
-  //   - content_block_delta with type "text_delta" (we yield)
-  if (!response.body) throw new Error("Anthropic response body is null");
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let currentEvent = "";
-  // Track whether current content block is a thinking block (to suppress output)
-  let currentBlockIsThinking = false;
-  // Anthropic reports stop_reason on the message_delta event, near the end of
-  // the stream. We capture it and report it via onFinish on message_stop.
-  let stopReason: string | undefined;
-
+  if (thinking?.enabled)
+    body.thinking = { type: "enabled", budget_tokens: budget };
+  if (options.tools?.length) body.tools = toolDefinitions(options.tools, true);
+  let response: Response;
   try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-
-      for (const line of lines) {
-        if (line.startsWith("event: ")) {
-          currentEvent = line.slice(7).trim();
-        } else if (line.startsWith("data: ")) {
-          const data = line.slice(6);
-
-          if (currentEvent === "message_delta") {
-            // Carries the final stop_reason for the message.
-            try {
-              const parsed = JSON.parse(data) as {
-                delta?: { stop_reason?: string };
-              };
-              if (parsed.delta?.stop_reason) {
-                stopReason = parsed.delta.stop_reason;
-              }
-            } catch {
-              // Ignore malformed JSON
-            }
-          } else if (currentEvent === "content_block_start") {
-            // Identify the block type so we know whether to suppress deltas
-            try {
-              const parsed = JSON.parse(data) as {
-                content_block?: { type?: string };
-              };
-              currentBlockIsThinking =
-                parsed.content_block?.type === "thinking";
-            } catch {
-              currentBlockIsThinking = false;
-            }
-          } else if (currentEvent === "content_block_stop") {
-            currentBlockIsThinking = false;
-          } else if (currentEvent === "content_block_delta") {
-            if (currentBlockIsThinking) {
-              // Thinking delta — track internally but do NOT yield to caller
-              continue;
-            }
-            try {
-              const parsed = JSON.parse(data) as {
-                delta?: { type?: string; text?: string };
-              };
-              if (parsed.delta?.type === "text_delta" && parsed.delta.text) {
-                yield parsed.delta.text;
-              }
-            } catch {
-              // Ignore malformed JSON
-            }
-          } else if (currentEvent === "message_stop") {
-            debug("llm", "anthropic stream → message_stop", { stopReason });
-            options.onFinish?.(stopReason);
-            return;
-          }
-        }
-      }
-    }
-    // Stream ended without an explicit message_stop event.
-    debug("llm", "anthropic stream → ended without message_stop", {
-      stopReason,
-    });
-    options.onFinish?.(stopReason);
-  } finally {
-    reader.releaseLock();
+    response = await fetch(
+      `${config.baseUrl || "https://api.anthropic.com"}/v1/messages`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      },
+    );
+  } catch (error) {
+    throw classifyModelError(error);
   }
-}
+  if (!response.ok)
+    throw modelErrorForResponse(
+      "anthropic",
+      config.model,
+      response.status,
+      await response.text(),
+    );
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Claude Code provider (subprocess)
-//
-// Used for the planner and verifier roles when provider is "claude-code".
-// These roles only need a single text completion, so we flatten the
-// conversation into one prompt and return the CLI's final result text.
-// Tools default to read-only so these roles never mutate the working tree.
-// The executor uses its own per-task path in executor.ts.
-// ─────────────────────────────────────────────────────────────────────────────
+  let text = "";
+  let rawStopReason: string | undefined;
+  let usage: ModelUsage = {};
+  const native = new Map<
+    number,
+    { id: string; name: string; arguments: string }
+  >();
+  for await (const item of parseSSE(response)) {
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(item.data) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (item.event === "message_start") {
+      const message = parsed.message as
+        { usage?: { input_tokens?: number } } | undefined;
+      usage.inputTokens = message?.usage?.input_tokens;
+    } else if (item.event === "content_block_start") {
+      const index = Number(parsed.index ?? 0);
+      const block = parsed.content_block as
+        { type?: string; id?: string; name?: string } | undefined;
+      if (block?.type === "tool_use")
+        native.set(index, {
+          id: block.id ?? `call_${index}`,
+          name: block.name ?? "",
+          arguments: "",
+        });
+    } else if (item.event === "content_block_delta") {
+      const index = Number(parsed.index ?? 0);
+      const delta = parsed.delta as
+        { type?: string; text?: string; partial_json?: string } | undefined;
+      if (delta?.type === "text_delta" && delta.text) {
+        text += delta.text;
+        options.onToken?.(delta.text);
+      }
+      if (delta?.type === "input_json_delta" && delta.partial_json) {
+        const call = native.get(index);
+        if (call) call.arguments += delta.partial_json;
+      }
+    } else if (item.event === "message_delta") {
+      const delta = parsed.delta as { stop_reason?: string } | undefined;
+      const eventUsage = parsed.usage as { output_tokens?: number } | undefined;
+      rawStopReason = delta?.stop_reason ?? rawStopReason;
+      usage.outputTokens = eventUsage?.output_tokens;
+    }
+  }
+  if (usage.inputTokens !== undefined || usage.outputTokens !== undefined)
+    usage.totalTokens = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
+  const toolCalls = [...native.values()]
+    .filter((call) => call.name)
+    .map((call) => ({
+      id: call.id,
+      name: call.name,
+      arguments: parseArguments(call.arguments),
+    }));
+  return {
+    text,
+    toolCalls: toolCalls.length ? toolCalls : parseToolCallsFromText(text),
+    usage,
+    rawStopReason,
+  };
+}
 
 function flattenForClaudeCode(messages: Message[]): string {
   return messages
-    .map((m) => {
-      if (m.role === "user") return m.content;
-      if (m.role === "assistant")
-        return `[you previously responded]\n${m.content}`;
-      return `[tool result]\n${m.content}`;
-    })
+    .map((message) =>
+      message.role === "user"
+        ? message.content
+        : `[${message.role}]\n${message.content}`,
+    )
     .join("\n\n");
 }
 
-async function* chatStreamClaudeCode(
+async function completeClaudeCode(
   config: RoleModelConfig,
   systemPrompt: string,
   messages: Message[],
-  options: ChatOptions = {},
-): AsyncGenerator<string> {
-  const prompt = flattenForClaudeCode(messages);
-  debug("llm", "claude-code subprocess → invoking runClaudeCode", {
-    model: config.model,
-    promptLen: prompt.length,
-  });
+  options: ChatOptions,
+  parentSpanId: string,
+): Promise<RawResult> {
   const result = await runClaudeCode({
-    prompt,
+    prompt: flattenForClaudeCode(messages),
     systemPrompt: systemPrompt || undefined,
     model: config.model,
     allowedTools: config.claudeCode?.allowedTools,
-    // Read-only by default: planner/verifier inspect but never edit.
     disallowedTools: config.claudeCode?.disallowedTools ?? [
       "Write",
       "Edit",
@@ -518,252 +420,154 @@ async function* chatStreamClaudeCode(
     isolateConfig: config.claudeCode?.isolateConfig,
     settingSources: config.claudeCode?.settingSources,
     signal: options.signal,
-    // Forward live progress so non-streaming callers (planner/verifier) can
-    // surface the sub-Claude's tokens and tool uses in real time instead of
-    // going silent until the whole run finishes.
     onToken: options.onToken,
-    onToolUse: options.onToolUse,
+    onToolUse: (use) => {
+      options.onToolUse?.(use);
+      const spanId = randomUUID();
+      options.onToolTrace?.({
+        phase: "start",
+        spanId,
+        parentSpanId,
+        name: use.name,
+      });
+      options.onToolTrace?.({
+        phase: "end",
+        spanId,
+        parentSpanId,
+        name: use.name,
+        success: true,
+      });
+    },
   });
-  debug("llm", "claude-code subprocess → returned", {
-    textLen: result.text.length,
-    numTurns: result.numTurns,
-    toolUses: result.toolUses.length,
-  });
-  if (result.text) yield result.text;
-  // The subprocess only returns once its own agent loop has finished, so a
-  // return is always a clean stop. (normalizeStopReason ignores the raw value
-  // for claude-code, but we report one for symmetry.)
-  options.onFinish?.("end_turn");
+  return {
+    text: result.text,
+    toolCalls: parseToolCallsFromText(result.text),
+    usage: {},
+    rawStopReason: "end_turn",
+  };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Tool call parsing from accumulated text (freeform fallback)
-//
-// Used when native function calling is unavailable or as a fallback for
-// local models that don't support the tools parameter.
-// ─────────────────────────────────────────────────────────────────────────────
-
-function parseToolCallsFromText(text: string): ToolCall[] {
-  const calls: ToolCall[] = [];
-  const toolBlockRegex = /```tool\s*\n?([\s\S]*?)\n?```/g;
-  let match;
-
-  while ((match = toolBlockRegex.exec(text)) !== null) {
-    try {
-      const parsed = JSON.parse(match[1].trim()) as Record<string, unknown>;
-      const name = parsed.name;
-      if (name && typeof name === "string") {
-        calls.push({
-          id: `call_${calls.length}`,
-          tool_name: name,
-          arguments: extractToolArguments(parsed),
-        });
-      }
-    } catch {
-      // Skip malformed tool calls
-    }
-  }
-
-  return calls;
-}
-
-/**
- * Pull tool arguments out of a parsed tool block, tolerating both the documented
- * shape `{"name","arguments":{...}}` and the common variant where models put the
- * args flat alongside `name` (e.g. `{"name":"read_file","path":"x"}`).
- */
-export function extractToolArguments(
-  parsed: Record<string, unknown>,
-): Record<string, unknown> {
-  if (parsed.arguments && typeof parsed.arguments === "object") {
-    return parsed.arguments as Record<string, unknown>;
-  }
-  const { name: _name, arguments: _args, ...rest } = parsed;
-  return rest;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// AbortSignal combiner helper
-// ─────────────────────────────────────────────────────────────────────────────
-
-function combineSignals(...signals: AbortSignal[]): AbortSignal {
-  const controller = new AbortController();
-  for (const signal of signals) {
-    if (signal.aborted) {
-      controller.abort(signal.reason);
-      break;
-    }
-    signal.addEventListener("abort", () => controller.abort(signal.reason));
-  }
-  return controller.signal;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Public API
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Streaming chat — yields string chunks as they arrive from the model.
- *
- * Supports:
- *   - provider: "openai"   → OpenAI API with SSE streaming
- *   - provider: "anthropic" → Anthropic Messages API with SSE streaming
- *   - provider: "local"    → OpenAI-compatible endpoint (Ollama, LM Studio,
- *                            vLLM, llama.cpp) — same path as "openai" but with
- *                            a local baseUrl and no auth header.
- */
-export async function* chatStream(
+async function completeOnce(
   config: RoleModelConfig,
+  systemPrompt: string,
+  messages: Message[],
+  options: ChatOptions,
+  spanId: string,
+): Promise<RawResult> {
+  if (config.provider === "anthropic")
+    return completeAnthropic(config, systemPrompt, messages, options);
+  if (config.provider === "claude-code")
+    return completeClaudeCode(config, systemPrompt, messages, options, spanId);
+  return completeOpenAI(config, systemPrompt, messages, options);
+}
+
+export async function chat(
+  config: RoleModelConfig,
+  systemPrompt: string,
   messages: Message[],
   options: ChatOptions = {},
-): AsyncGenerator<string> {
-  // Extract systemPrompt from messages if it's the first system message,
-  // otherwise use empty string. The callers currently pass system prompts
-  // separately; here we receive them as part of the messages array OR via the
-  // options object. For compatibility we check if the first message is system.
-  const firstMsg = messages[0];
-  let systemPrompt = "";
-  let chatMessages = messages;
-
-  if (firstMsg && (firstMsg as { role: string }).role === "system") {
-    systemPrompt = firstMsg.content;
-    chatMessages = messages.slice(1);
-  }
-
-  if (config.provider === "anthropic") {
-    yield* chatStreamAnthropic(config, systemPrompt, chatMessages, options);
-  } else if (config.provider === "claude-code") {
-    yield* chatStreamClaudeCode(config, systemPrompt, chatMessages, options);
-  } else {
-    // "openai" and "local" both use OpenAI-compatible API
-    let cfg = config;
-    if (
-      config.provider === "openai" &&
-      !config.apiKey &&
-      process.env.OPENAI_API_KEY
-    ) {
-      cfg = { ...config, apiKey: process.env.OPENAI_API_KEY };
-    }
-    yield* chatStreamOpenAI(cfg, systemPrompt, chatMessages, options);
-  }
+): Promise<ModelResult> {
+  return retryModelCall(
+    async (attempt) => {
+      const spanId = randomUUID();
+      const startedAt = Date.now();
+      options.onTrace?.({
+        phase: "start",
+        spanId,
+        provider: config.provider,
+        model: config.model,
+        attempt,
+      });
+      try {
+        const raw = await completeOnce(
+          config,
+          systemPrompt,
+          messages,
+          options,
+          spanId,
+        );
+        const result: ModelResult = {
+          text: raw.text,
+          toolCalls: raw.toolCalls,
+          usage: raw.usage,
+          stopReason: normalizeStopReason(config.provider, raw.rawStopReason),
+          provider: config.provider,
+          model: config.model,
+          spanId,
+        };
+        options.onFinish?.(raw.rawStopReason);
+        options.onTrace?.({
+          phase: "end",
+          spanId,
+          provider: config.provider,
+          model: config.model,
+          attempt,
+          durationMs: Date.now() - startedAt,
+          result,
+        });
+        return result;
+      } catch (error) {
+        const classified = classifyModelError(error);
+        options.onTrace?.({
+          phase: "end",
+          spanId,
+          provider: config.provider,
+          model: config.model,
+          attempt,
+          durationMs: Date.now() - startedAt,
+          error: { kind: classified.kind, message: classified.message },
+        });
+        throw classified;
+      }
+    },
+    config.retry,
+    { signal: options.signal },
+  );
 }
 
-/**
- * Streaming chat with an explicit system prompt (separate from messages array).
- * Use this from executor/planner/verifier where the system prompt is built
- * independently and passed alongside the conversation history.
- */
 export async function* chatStreamWithSystem(
   config: RoleModelConfig,
   systemPrompt: string,
   messages: Message[],
   options: ChatOptions = {},
 ): AsyncGenerator<string> {
-  if (config.provider === "anthropic") {
-    yield* chatStreamAnthropic(config, systemPrompt, messages, options);
-  } else if (config.provider === "claude-code") {
-    yield* chatStreamClaudeCode(config, systemPrompt, messages, options);
-  } else {
-    let cfg = config;
-    if (
-      config.provider === "openai" &&
-      !config.apiKey &&
-      process.env.OPENAI_API_KEY
-    ) {
-      cfg = { ...config, apiKey: process.env.OPENAI_API_KEY };
-    }
-    yield* chatStreamOpenAI(cfg, systemPrompt, messages, options);
-  }
+  const result = await chat(config, systemPrompt, messages, options);
+  yield result.text;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Local model health check
-// ─────────────────────────────────────────────────────────────────────────────
+export async function* chatStream(
+  config: RoleModelConfig,
+  messages: Message[],
+  options: ChatOptions = {},
+): AsyncGenerator<string> {
+  const first = messages[0] as { role?: string; content: string } | undefined;
+  const systemPrompt = first?.role === "system" ? first.content : "";
+  yield* chatStreamWithSystem(
+    config,
+    systemPrompt,
+    first?.role === "system" ? messages.slice(1) : messages,
+    options,
+  );
+}
 
-/**
- * Check whether a local model server is reachable and lists available models.
- * Hits GET {baseUrl}/models and returns a simple ok/error result.
- */
 export async function checkLocalModel(
   config: RoleModelConfig,
 ): Promise<{ ok: boolean; models?: string[]; error?: string }> {
-  if (!config.baseUrl) {
+  if (!config.baseUrl)
+    return { ok: false, error: "Local provider requires a baseUrl" };
+  try {
+    const response = await fetch(`${config.baseUrl}/models`);
+    if (!response.ok)
+      return { ok: false, error: `Server responded with ${response.status}` };
+    const data = (await response.json()) as { data?: Array<{ id?: string }> };
+    return {
+      ok: true,
+      models: (data.data ?? []).map((model) => model.id ?? "").filter(Boolean),
+    };
+  } catch (error) {
     return {
       ok: false,
-      error:
-        "Local provider requires a baseUrl (e.g. http://localhost:11434/v1 for Ollama, http://localhost:1234/v1 for LM Studio)",
+      error: error instanceof Error ? error.message : String(error),
     };
   }
-
-  try {
-    const response = await fetch(`${config.baseUrl}/models`, {
-      method: "GET",
-      headers: { "Content-Type": "application/json" },
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      return {
-        ok: false,
-        error: `Server responded with ${response.status}: ${text}`,
-      };
-    }
-
-    const data = (await response.json()) as {
-      data?: Array<{ id?: string }>;
-    };
-    const models = (data.data ?? [])
-      .map((m) => m.id ?? "")
-      .filter((id) => id !== "");
-
-    return { ok: true, models };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes("ECONNREFUSED") || msg.includes("fetch failed")) {
-      return {
-        ok: false,
-        error: `Could not connect to local model server at ${config.baseUrl}. Is the server running? (${msg})`,
-      };
-    }
-    return { ok: false, error: msg };
-  }
 }
-
-/**
- * Non-streaming convenience wrapper around chatStream.
- * Collects all chunks into a full string, then parses any tool calls.
- * Use this for planner/verifier where streaming doesn't improve UX.
- *
- * When native tool definitions are provided, the model will return structured
- * tool calls; these are passed through via parseToolCallsFromText as a
- * freeform fallback if needed.
- */
-export async function chat(
-  config: RoleModelConfig,
-  systemPrompt: string,
-  messages: Message[],
-  options: ChatOptions = {},
-): Promise<ChatResponse> {
-  const chunks: string[] = [];
-
-  for await (const chunk of chatStreamWithSystem(
-    config,
-    systemPrompt,
-    messages,
-    options,
-  )) {
-    chunks.push(chunk);
-  }
-
-  const content = chunks.join("");
-  const toolCalls = parseToolCallsFromText(content);
-
-  return {
-    content,
-    toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-  };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Config loading (keep existing logic, cleaned up)
-// ─────────────────────────────────────────────────────────────────────────────

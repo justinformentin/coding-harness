@@ -20,6 +20,14 @@ export const RoleModelConfigSchema = z
       .optional(),
     temperature: z.number().min(0).max(2).optional(),
     maxTokens: z.number().int().positive().optional(),
+    retry: z
+      .object({
+        maxAttempts: z.number().int().positive(),
+        baseDelayMs: z.number().int().nonnegative(),
+        maxDelayMs: z.number().int().nonnegative(),
+      })
+      .strict()
+      .optional(),
     thinking: z
       .object({
         enabled: z.boolean(),

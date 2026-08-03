@@ -1,14 +1,16 @@
 import { chat } from "./llm.js";
 import { plannerSystemPrompt } from "./prompts.js";
-import { executeTool } from "./tools.js";
+import { executeTool, modelToolDefinitions } from "./tools.js";
 import { debug, time } from "./debug.js";
 import {
   PlannerOutputSchema,
   type PlannerChecklistItem,
   type RoleModelConfig,
   type Message,
+  type ModelTrace,
 } from "./schemas.js";
 import { validatePlan } from "./contracts/plan.js";
+import { randomUUID } from "crypto";
 
 // How many times to re-prompt the planner when it returns something that
 // isn't valid JSON matching the schema. Models (especially ones without a
@@ -31,6 +33,20 @@ export type PlannerCallbacks = {
   onToken?: (token: string) => void;
   /** Fires in real time each time the planner invokes a tool. */
   onToolUse?: (use: { name: string; input: unknown }) => void;
+  onModelTrace?: (trace: ModelTrace) => void;
+  onToolTrace?: (trace: {
+    phase: "start" | "end";
+    spanId: string;
+    parentSpanId: string;
+    name: string;
+    success?: boolean;
+  }) => void;
+  onParseFailure?: (failure: {
+    role: "planner";
+    attempt: number;
+    error: string;
+    text: string;
+  }) => Promise<void>;
   /** Aborts the planner's model call (and any sub-Claude) when the run is stopped. */
   signal?: AbortSignal;
 };
@@ -62,27 +78,27 @@ export async function plan(
     debug("planner", `turn ${turn}: calling chat()`, {
       messageCount: messages.length,
     });
-    const { content, toolCalls } = await time(
-      "planner",
-      `turn ${turn} chat()`,
-      () =>
-        chat(config, systemPrompt, messages, {
-          onToken: callbacks?.onToken,
-          onToolUse: callbacks?.onToolUse,
-          signal: callbacks?.signal,
-        }),
+    const result = await time("planner", `turn ${turn} chat()`, () =>
+      chat(config, systemPrompt, messages, {
+        responseFormat: "json_object",
+        tools: freeformTools ? modelToolDefinitions([...READ_ONLY]) : undefined,
+        onToken: callbacks?.onToken,
+        onToolUse: callbacks?.onToolUse,
+        onTrace: callbacks?.onModelTrace,
+        onToolTrace: callbacks?.onToolTrace,
+        signal: callbacks?.signal,
+      }),
     );
     debug("planner", `turn ${turn}: chat() returned`, {
-      contentLen: content.length,
-      toolCalls: toolCalls?.length ?? 0,
+      contentLen: result.text.length,
+      toolCalls: result.toolCalls.length,
     });
 
     // Exploration: if the model issued tool calls (and it still has budget),
     // run them read-only and feed the results back for another turn.
     if (
       freeformTools &&
-      toolCalls &&
-      toolCalls.length > 0 &&
+      result.toolCalls.length > 0 &&
       exploreTurns < MAX_EXPLORE_TURNS
     ) {
       exploreTurns++;
@@ -91,11 +107,11 @@ export async function plan(
       // hallucinate the tool's output inline after emitting the call; storing
       // that fabricated text would poison later turns. We replace it with the
       // real results below.
-      const cleanAssistant = toolCalls
+      const cleanAssistant = result.toolCalls
         .map(
           (tc) =>
             "```tool\n" +
-            JSON.stringify({ name: tc.tool_name, arguments: tc.arguments }) +
+            JSON.stringify({ name: tc.name, arguments: tc.arguments }) +
             "\n```",
         )
         .join("\n");
@@ -103,30 +119,44 @@ export async function plan(
 
       if (process.env.HARNESS_DEBUG_PLANNER) {
         console.error(
-          `[planner] turn ${exploreTurns}: ${toolCalls
-            .map((t) => `${t.tool_name}(${JSON.stringify(t.arguments)})`)
+          `[planner] turn ${exploreTurns}: ${result.toolCalls
+            .map((t) => `${t.name}(${JSON.stringify(t.arguments)})`)
             .join(", ")}`,
         );
       }
 
       const outputs: string[] = [];
-      for (const tc of toolCalls) {
+      for (const tc of result.toolCalls) {
         // Guard against the model trying a mutating tool during planning.
-        if (!READ_ONLY.has(tc.tool_name)) {
+        if (!READ_ONLY.has(tc.name)) {
           outputs.push(
-            `[${tc.tool_name}] ERROR: not available while planning (read-only). Plan the change instead.`,
+            `[${tc.name}] ERROR: not available while planning (read-only). Plan the change instead.`,
           );
           continue;
         }
-        const result = await time("planner", `tool ${tc.tool_name}`, () =>
-          executeTool(tc.tool_name, tc.arguments),
+        const spanId = randomUUID();
+        callbacks?.onToolTrace?.({
+          phase: "start",
+          spanId,
+          parentSpanId: result.spanId,
+          name: tc.name,
+        });
+        const toolResult = await time("planner", `tool ${tc.name}`, () =>
+          executeTool(tc.name, tc.arguments),
         );
+        callbacks?.onToolTrace?.({
+          phase: "end",
+          spanId,
+          parentSpanId: result.spanId,
+          name: tc.name,
+          success: toolResult.success,
+        });
         const output =
-          result.output.length > MAX_TOOL_OUTPUT
-            ? result.output.slice(0, MAX_TOOL_OUTPUT) + "\n…(truncated)"
-            : result.output;
+          toolResult.output.length > MAX_TOOL_OUTPUT
+            ? toolResult.output.slice(0, MAX_TOOL_OUTPUT) + "\n…(truncated)"
+            : toolResult.output;
         outputs.push(
-          `[${tc.tool_name}] ${result.success ? "OK" : "ERROR"}: ${output}`,
+          `[${tc.name}] ${toolResult.success ? "OK" : "ERROR"}: ${output}`,
         );
       }
       messages.push({ role: "tool", content: outputs.join("\n\n") });
@@ -134,7 +164,7 @@ export async function plan(
     }
 
     // No (more) tool calls — treat this as the final plan.
-    const parsed = parsePlannerOutput(content);
+    const parsed = parsePlannerOutput(result.text);
     if (parsed.ok) {
       debug("planner", "produced valid plan", {
         itemCount: parsed.value.checklist.length,
@@ -149,13 +179,19 @@ export async function plan(
 
     lastError = parsed.error;
     parseAttempts++;
+    await callbacks?.onParseFailure?.({
+      role: "planner",
+      attempt: parseAttempts,
+      error: parsed.error,
+      text: result.text,
+    });
     debug("planner", `parse failed (attempt ${parseAttempts})`, {
       error: parsed.error,
     });
     if (parseAttempts >= MAX_PLAN_ATTEMPTS) break;
 
     // Feed the bad response back and ask the model to correct itself.
-    messages.push({ role: "assistant", content });
+    messages.push({ role: "assistant", content: result.text });
     messages.push({
       role: "user",
       content:
@@ -231,13 +267,7 @@ export function validatePlannerChecklist(
 }
 
 function extractJSON(text: string): string {
-  // Try to find JSON in code blocks first
-  const codeBlockMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-  if (codeBlockMatch) return codeBlockMatch[1].trim();
-
-  // Try to find raw JSON object
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (jsonMatch) return jsonMatch[0];
-
-  return text.trim();
+  const trimmed = text.trim();
+  const fenced = /^```(?:json)?\s*\n([\s\S]*?)\n```$/.exec(trimmed);
+  return fenced ? fenced[1].trim() : trimmed;
 }

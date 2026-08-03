@@ -8,6 +8,15 @@ export {
   type ResolvedConfig,
 } from "./contracts/config.js";
 import { AssertionSchema, type Assertion } from "./contracts/plan.js";
+export {
+  ModelResultSchema,
+  ModelToolCallSchema,
+  ModelUsageSchema,
+  type ModelResult,
+  type ModelToolCall,
+  type ModelUsage,
+  type ModelTrace,
+} from "./contracts/model.js";
 
 export const MessageSchema = z.object({
   role: z.enum(["user", "assistant", "tool"]),
@@ -68,19 +77,25 @@ export const VerifierReportSchema = z.object({
   incompleteItems: z.array(z.string()),
   missingEvidence: z.array(z.string()),
   nextInstruction: z.string(),
+  assertionResults: z
+    .array(
+      z.object({
+        stepId: z.string(),
+        assertion: z.number().int().nonnegative(),
+        kind: z.string(),
+        status: z.enum(["passed", "failed", "human_review"]),
+        expected: z.string(),
+        actual: z.string(),
+        confidence: z.enum(["deterministic", "model", "human"]),
+        evidenceIds: z.array(z.string()).optional(),
+      }),
+    )
+    .default([]),
 });
 
 export type VerifierReport = z.infer<typeof VerifierReportSchema>;
 
 // Tool calling types
-export const ToolCallSchema = z.object({
-  id: z.string(),
-  tool_name: z.string(),
-  arguments: z.record(z.unknown()),
-});
-
-export type ToolCall = z.infer<typeof ToolCallSchema>;
-
 export const ToolDefinitionSchema = z.object({
   name: z.string(),
   description: z.string(),
@@ -88,13 +103,6 @@ export const ToolDefinitionSchema = z.object({
 });
 
 export type ToolDefinition = z.infer<typeof ToolDefinitionSchema>;
-
-export const ChatResponseSchema = z.object({
-  content: z.string(),
-  toolCalls: z.array(ToolCallSchema).optional(),
-});
-
-export type ChatResponse = z.infer<typeof ChatResponseSchema>;
 
 export type ChatOptions = {
   temperature?: number;
@@ -117,6 +125,14 @@ export type ChatOptions = {
   onToken?: (token: string) => void;
   // Fires for each tool the model invokes.
   onToolUse?: (use: { name: string; input: unknown }) => void;
+  onTrace?: (trace: import("./contracts/model.js").ModelTrace) => void;
+  onToolTrace?: (trace: {
+    phase: "start" | "end";
+    spanId: string;
+    parentSpanId: string;
+    name: string;
+    success?: boolean;
+  }) => void;
 };
 
 export const ArtifactsSchema = z.object({
@@ -168,6 +184,8 @@ export const HarnessStateSchema = z.object({
     ])
     .optional(),
   reviewRequired: z.array(z.string()).default([]),
+  stepMessages: z.record(z.array(MessageSchema)).default({}),
+  contextArtifacts: z.record(z.array(z.string())).default({}),
 });
 
 export type HarnessState = z.infer<typeof HarnessStateSchema>;
