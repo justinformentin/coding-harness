@@ -6,6 +6,7 @@ import { resolve } from "path";
 import type { Assertion } from "./contracts/plan.js";
 import type { HarnessState, PlannerChecklistItem } from "./schemas.js";
 import { gitChangedFiles } from "./claude-code.js";
+import type { ModelJudgeDecision } from "./model-judge.js";
 
 export type AssertionStatus = "passed" | "failed" | "human_review";
 export type AssertionResult = {
@@ -15,6 +16,8 @@ export type AssertionResult = {
   expected: string;
   actual: string;
   stdout?: string;
+  confidence: "deterministic" | "model" | "human";
+  evidenceIds?: string[];
 };
 export type StepVerification = {
   stepId: string;
@@ -81,6 +84,10 @@ export async function verifyStepAssertions(
   workspaceRoot = process.cwd(),
   commandTimeoutMs = 120_000,
   maxOutputBytes = 100_000,
+  modelJudge?: (input: {
+    rubric: string;
+    evidence: Record<string, string>;
+  }) => Promise<ModelJudgeDecision>,
 ): Promise<StepVerification> {
   const assertions = item.assertions;
   if (!assertions.length)
@@ -91,6 +98,17 @@ export async function verifyStepAssertions(
       failures: [`${item.id}: no assertions`],
     };
   const results: AssertionResult[] = [];
+  const evidence: Record<string, string> = {};
+  for (const path of state.artifacts.filesChanged) {
+    try {
+      evidence[`file:${path}`] = (
+        await readFile(resolve(workspaceRoot, path), "utf8")
+      ).slice(0, maxOutputBytes);
+    } catch {}
+  }
+  state.artifacts.commandOutputs.forEach((output, index) => {
+    evidence[`command:${index}`] = output.slice(0, maxOutputBytes);
+  });
 
   for (let index = 0; index < assertions.length; index++) {
     const assertion = assertions[index];
@@ -101,7 +119,56 @@ export async function verifyStepAssertions(
         status: "human_review",
         expected: assertion.instructions,
         actual: "awaiting human review",
+        confidence: "human",
       });
+      continue;
+    }
+    if (assertion.kind === "model_judge") {
+      const selected = Object.fromEntries(
+        assertion.evidenceIds
+          .filter((id) => id in evidence)
+          .map((id) => [id, evidence[id]]),
+      );
+      const missing = assertion.evidenceIds.filter((id) => !(id in evidence));
+      if (missing.length || !modelJudge) {
+        results.push({
+          assertion: index,
+          kind: assertion.kind,
+          status: "failed",
+          expected: assertion.rubric,
+          actual: missing.length
+            ? `missing evidence IDs: ${missing.join(", ")}`
+            : "model judge is unavailable",
+          confidence: "model",
+          evidenceIds: assertion.evidenceIds,
+        });
+      } else {
+        try {
+          const decision = await modelJudge({
+            rubric: assertion.rubric,
+            evidence: selected,
+          });
+          results.push({
+            assertion: index,
+            kind: assertion.kind,
+            status: decision.passed ? "passed" : "failed",
+            expected: assertion.rubric,
+            actual: decision.rationale,
+            confidence: decision.confidence,
+            evidenceIds: decision.evidenceIds,
+          });
+        } catch (error) {
+          results.push({
+            assertion: index,
+            kind: assertion.kind,
+            status: "failed",
+            expected: assertion.rubric,
+            actual: `model judge error: ${error instanceof Error ? error.message : String(error)}`,
+            confidence: "model",
+            evidenceIds: assertion.evidenceIds,
+          });
+        }
+      }
       continue;
     }
     if (assertion.kind === "file_exists") {
@@ -112,6 +179,7 @@ export async function verifyStepAssertions(
         status: found ? "passed" : "failed",
         expected: assertion.path,
         actual: found ? "exists" : "missing",
+        confidence: "deterministic",
       });
       continue;
     }
@@ -136,6 +204,7 @@ export async function verifyStepAssertions(
           status: "failed",
           expected: assertion.pattern,
           actual: `invalid regex: ${String(error)}`,
+          confidence: "deterministic",
         });
         continue;
       }
@@ -146,6 +215,7 @@ export async function verifyStepAssertions(
         status: passed ? "passed" : "failed",
         expected: assertion.pattern,
         actual: matched ? "matched" : "did not match",
+        confidence: "deterministic",
       });
       continue;
     }
@@ -160,6 +230,7 @@ export async function verifyStepAssertions(
         status: passed ? "passed" : "failed",
         expected: assertion.path ?? "any workspace diff",
         actual: changed.join(", ") || "no changes",
+        confidence: "deterministic",
       });
       continue;
     }
@@ -177,6 +248,7 @@ export async function verifyStepAssertions(
         expected: `${JSON.stringify(assertion.argv)} exits ${assertion.exitCode}`,
         actual: `exit ${command.code}`,
         stdout: command.stdout,
+        confidence: "deterministic",
       });
       continue;
     }
@@ -189,6 +261,7 @@ export async function verifyStepAssertions(
       status: passed ? "passed" : "failed",
       expected: assertion.contains,
       actual: output,
+      confidence: "deterministic",
     });
   }
 

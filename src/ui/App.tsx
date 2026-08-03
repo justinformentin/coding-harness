@@ -335,6 +335,13 @@ export function App({
               addLog("verifier", `Missing: ${truncated}`);
             }
           }
+          for (const result of r.assertionResults.filter(
+            (assertion) => assertion.confidence === "model",
+          ))
+            addLog(
+              "verifier",
+              `Model judgment (${result.stepId}, lower confidence): ${result.actual}`,
+            );
           // Update checklist from report
           setChecklist((prev) => {
             const updated = prev.map((item) => ({ ...item }));
@@ -381,6 +388,23 @@ export function App({
           addLog("system", "Run stopped");
           break;
         case "attempt_complete":
+          break;
+        case "model_call_start":
+        case "model_call_end":
+        case "tool_call_start":
+        case "tool_call_end":
+          break;
+        case "parse_failure":
+          addLog(
+            "system",
+            `${event.role} output parse failed (attempt ${event.parseAttempt}); evidence: ${event.artifact}`,
+          );
+          break;
+        case "context_compacted":
+          addLog(
+            "system",
+            `Compacted ${event.removedMessages} message(s) for ${event.stepId}; artifact: ${event.artifact}`,
+          );
           break;
         case "error":
           setStatus("error");

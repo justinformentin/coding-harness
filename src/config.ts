@@ -15,18 +15,21 @@ export const DEFAULT_CONFIG: ResolvedConfig = {
     provider: "anthropic",
     model: "claude-sonnet-4-20250514",
     temperature: 0.2,
+    retry: { maxAttempts: 3, baseDelayMs: 200, maxDelayMs: 2000 },
   },
   executor: {
     provider: "local",
     model: "qwen2.5-coder:7b",
     baseUrl: "http://localhost:11434/v1",
     temperature: 0.2,
+    retry: { maxAttempts: 3, baseDelayMs: 200, maxDelayMs: 2000 },
   },
   verifier: {
     provider: "local",
     model: "qwen2.5-coder:14b",
     baseUrl: "http://localhost:11434/v1",
     temperature: 0.1,
+    retry: { maxAttempts: 3, baseDelayMs: 200, maxDelayMs: 2000 },
   },
   loop: {
     maxAttemptsPerStep: 3,

@@ -46,6 +46,13 @@ export const AssertionSchema = z.discriminatedUnion("kind", [
       instructions: z.string().min(1),
     })
     .strict(),
+  z
+    .object({
+      kind: z.literal("model_judge"),
+      rubric: z.string().min(1),
+      evidenceIds: z.array(z.string().min(1)).min(1),
+    })
+    .strict(),
 ]);
 export type Assertion = z.infer<typeof AssertionSchema>;
 

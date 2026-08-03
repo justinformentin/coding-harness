@@ -326,15 +326,31 @@ function storeFor(runId: string): FileRunStore {
 }
 
 export function appendEvent(runId: string, event: HarnessEvent): Promise<void> {
-  const { type, ...data } = event;
+  const { type, ...rest } = event;
+  const data = { ...rest } as Record<string, unknown>;
+  const spanId = typeof data.spanId === "string" ? data.spanId : undefined;
+  const parentSpanId =
+    typeof data.parentSpanId === "string" ? data.parentSpanId : undefined;
+  const attempt =
+    typeof data.callAttempt === "number" ? data.callAttempt : undefined;
+  delete data.spanId;
+  delete data.parentSpanId;
+  delete data.callAttempt;
   return storeFor(runId)
-    .append({ type, data })
+    .append({ type, data, spanId, parentSpanId, attempt })
     .then(() => undefined);
 }
 
 export async function loadEvents(runId: string): Promise<HarnessEvent[]> {
   return (await storeFor(runId).readEvents()).map(
-    ({ type, data }) => ({ type, ...data }) as HarnessEvent,
+    ({ type, data, spanId, parentSpanId, attempt }) =>
+      ({
+        type,
+        ...data,
+        spanId,
+        parentSpanId,
+        callAttempt: attempt,
+      }) as HarnessEvent,
   );
 }
 

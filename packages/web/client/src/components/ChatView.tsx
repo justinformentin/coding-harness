@@ -101,6 +101,11 @@ function formatEvent(ev: HarnessEvent): Entry | null {
         incompleteItems?: string[];
         missingEvidence?: string[];
         nextInstruction?: string;
+        assertionResults?: Array<{
+          stepId: string;
+          actual: string;
+          confidence: string;
+        }>;
       };
       if (r.done)
         return { source: "verifier", text: "All items verified complete" };
@@ -110,6 +115,11 @@ function formatEvent(ev: HarnessEvent): Entry | null {
       if (r.missingEvidence?.length)
         parts.push(`Missing: ${r.missingEvidence.join("; ")}`);
       if (r.nextInstruction) parts.push(`Next: ${r.nextInstruction}`);
+      for (const result of r.assertionResults ?? [])
+        if (result.confidence === "model")
+          parts.push(
+            `Model judgment (${result.stepId}, lower confidence): ${result.actual}`,
+          );
       return { source: "verifier", text: parts.join("\n") || "Incomplete" };
     }
     case "repair":
@@ -132,6 +142,21 @@ function formatEvent(ev: HarnessEvent): Entry | null {
       return { source: "error", text: "Run blocked by unmet dependencies." };
     case "attempt_complete":
       return null;
+    case "model_call_start":
+    case "model_call_end":
+    case "tool_call_start":
+    case "tool_call_end":
+      return null;
+    case "parse_failure":
+      return {
+        source: "system",
+        text: `${String(ev.role)} parse failed; evidence artifact: ${String(ev.artifact)}`,
+      };
+    case "context_compacted":
+      return {
+        source: "system",
+        text: `Compacted ${String(ev.removedMessages)} message(s) for ${String(ev.stepId)}; artifact: ${String(ev.artifact)}`,
+      };
     case "error":
       return { source: "error", text: String(ev.message ?? "error") };
     default:

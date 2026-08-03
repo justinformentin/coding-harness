@@ -153,6 +153,46 @@ export function toolsToPromptDescription(names?: string[]): string {
     .join("\n\n");
 }
 
+export function modelToolDefinitions(names?: string[]) {
+  const selected = names
+    ? tools.filter((tool) => names.includes(tool.name))
+    : tools;
+  return [
+    ...selected.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: {
+        type: "object",
+        properties: Object.fromEntries(
+          Object.entries(tool.parameters).map(([name, parameter]) => [
+            name,
+            { type: parameter.type, description: parameter.description },
+          ]),
+        ),
+        required: Object.entries(tool.parameters)
+          .filter(([, parameter]) => parameter.required)
+          .map(([name]) => name),
+      },
+    })),
+    ...(names && !names.includes("finish")
+      ? []
+      : [
+          {
+            name: "finish",
+            description: "Declare the current step attempt complete.",
+            parameters: {
+              type: "object",
+              properties: {
+                summary: { type: "string" },
+                completedItems: { type: "array", items: { type: "string" } },
+              },
+              required: ["summary", "completedItems"],
+            },
+          },
+        ]),
+  ];
+}
+
 export async function executeTool(
   name: string,
   args: Record<string, unknown>,

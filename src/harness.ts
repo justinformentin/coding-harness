@@ -26,6 +26,8 @@ import {
   verifyStepAssertions,
 } from "./assertion-verifier.js";
 import type { StopReason } from "./contracts/result.js";
+import type { ModelTrace } from "./contracts/model.js";
+import { judgeWithModel } from "./model-judge.js";
 
 export type HarnessEvent =
   | { type: "run_init"; runId: string }
@@ -40,6 +42,37 @@ export type HarnessEvent =
     }
   | { type: "plan_approved" }
   | { type: "plan_rejected" }
+  | {
+      type: "model_call_start" | "model_call_end";
+      spanId: string;
+      provider: string;
+      model: string;
+      callAttempt: number;
+      durationMs?: number;
+      usage?: Record<string, number | undefined>;
+      stopReason?: string;
+      error?: { kind: string; message: string };
+    }
+  | {
+      type: "tool_call_start" | "tool_call_end";
+      spanId: string;
+      parentSpanId: string;
+      name: string;
+      success?: boolean;
+    }
+  | {
+      type: "parse_failure";
+      role: "planner" | "verifier";
+      parseAttempt: number;
+      error: string;
+      artifact: string;
+    }
+  | {
+      type: "context_compacted";
+      stepId: string;
+      removedMessages: number;
+      artifact: string;
+    }
   | {
       type: "step_transition";
       stepId: string;
@@ -235,10 +268,16 @@ function applySteering(
   state: HarnessState,
   emit: EventCallback,
   drainSteering?: () => string[],
+  stepId?: string,
 ): void {
   const pending = drainSteering?.() ?? [];
   for (const message of pending) {
     state.messages.push({ role: "user", content: message });
+    if (stepId)
+      (state.stepMessages[stepId] ??= []).push({
+        role: "user",
+        content: message,
+      });
     emit({ type: "steering", message });
   }
 }
@@ -270,6 +309,75 @@ function transitionStep(
   emit({ type: "step_transition", stepId: item.id, from, to });
 }
 
+function modelTraceHandler(
+  state: HarnessState,
+  emit: EventCallback,
+): (trace: ModelTrace) => void {
+  return (trace) => {
+    if (trace.phase === "start") {
+      state.modelCalls++;
+      emit({
+        type: "model_call_start",
+        spanId: trace.spanId,
+        provider: trace.provider,
+        model: trace.model,
+        callAttempt: trace.attempt,
+      });
+    } else {
+      emit({
+        type: "model_call_end",
+        spanId: trace.spanId,
+        provider: trace.provider,
+        model: trace.model,
+        callAttempt: trace.attempt,
+        durationMs: trace.durationMs,
+        usage: trace.result?.usage,
+        stopReason: trace.result?.stopReason,
+        error: trace.error,
+      });
+    }
+  };
+}
+
+function toolTraceHandler(emit: EventCallback) {
+  return (trace: {
+    phase: "start" | "end";
+    spanId: string;
+    parentSpanId: string;
+    name: string;
+    success?: boolean;
+  }) =>
+    emit({
+      type: trace.phase === "start" ? "tool_call_start" : "tool_call_end",
+      spanId: trace.spanId,
+      parentSpanId: trace.parentSpanId,
+      name: trace.name,
+      success: trace.success,
+    });
+}
+
+async function persistParseFailure(
+  state: HarnessState,
+  emit: EventCallback,
+  failure: {
+    role: "planner" | "verifier";
+    attempt: number;
+    error: string;
+    text: string;
+  },
+): Promise<void> {
+  const artifact = await new FileRunStore(state.runId).putArtifact(
+    failure.text,
+  );
+  emit({
+    type: "parse_failure",
+    role: failure.role,
+    parseAttempt: failure.attempt,
+    error: failure.error,
+    artifact,
+  });
+}
+
 export async function runHarness(
   prompt: string,
   config: ResolvedConfig,
@@ -283,6 +391,8 @@ export async function runHarness(
   const state = createInitialState(prompt, maxIterations);
   const runSignal = boundedRunSignal(state, config, options.signal);
   const { emit, flush } = createEmitter(state, onEvent);
+  const onModelTrace = modelTraceHandler(state, emit);
+  const onToolTrace = toolTraceHandler(emit);
   debug("harness", "runHarness starting", {
     runId: state.runId,
     maxIterations,
@@ -301,7 +411,6 @@ export async function runHarness(
     emit({ type: "plan_start" });
     state.checklist = await time("harness", "plan()", () =>
       plan(prompt, config.planner, {
-        onModelCall: () => state.modelCalls++,
         onToken: (token) => emit({ type: "plan_token", token }),
         onToolUse: (use) => {
           state.toolCalls++;
@@ -311,6 +420,9 @@ export async function runHarness(
             detail: toolDetail(use.input),
           });
         },
+        onModelTrace,
+        onToolTrace,
+        onParseFailure: (failure) => persistParseFailure(state, emit, failure),
         signal: runSignal,
       }),
     );
@@ -416,6 +528,8 @@ async function runHarnessLoop(
   const signal = options?.signal;
   const scheduler = new DependencyScheduler();
   const controller = new DeterministicRunController(state, config);
+  const onModelTrace = modelTraceHandler(state, emit);
+  const onToolTrace = toolTraceHandler(emit);
 
   // A persisted in-flight operation was interrupted before verification could
   // establish an outcome. Resume it as retryable without losing its counters.
@@ -477,7 +591,7 @@ async function runHarnessLoop(
     });
 
     // Inject any mid-run steering the user queued while we were busy
-    applySteering(state, emit, options?.drainSteering);
+    applySteering(state, emit, options?.drainSteering, item.id);
 
     const result = await time(
       "harness",
@@ -487,6 +601,21 @@ async function runHarnessLoop(
           targetItemId: item.id,
           maxModelCalls: config.loop.maxModelCalls - state.modelCalls,
           maxToolCalls: config.loop.maxToolCalls - state.toolCalls,
+          contextLimits: config.context,
+          onModelTrace,
+          onToolTrace,
+          onContextCompacted: async ({ stepId, messages }) => {
+            const artifact = await new FileRunStore(state.runId).putArtifact(
+              JSON.stringify(messages),
+            );
+            emit({
+              type: "context_compacted",
+              stepId,
+              removedMessages: messages.length,
+              artifact,
+            });
+            return artifact;
+          },
           onToken: (token) => emit({ type: "executor_token", token }),
           onToolUse: (use) =>
             emit({
@@ -538,10 +667,33 @@ async function runHarnessLoop(
       config.workspace.root,
       assertionTimeoutMs,
       config.workspace.maxOutputBytes,
+      ({ rubric, evidence }) =>
+        state.modelCalls >= config.loop.maxModelCalls
+          ? Promise.reject(new Error("model call budget exhausted"))
+          : judgeWithModel(
+              config.verifier,
+              { rubric, evidence },
+              {
+                signal,
+                onModelTrace,
+                onParseFailure: (failure) =>
+                  persistParseFailure(state, emit, failure),
+              },
+            ),
     );
     const completedItems: string[] = [];
     const incompleteItems: string[] = [];
     const missingEvidence = [...verification.failures];
+    const assertionResults = verification.assertions.map((result) => ({
+      stepId: item.id,
+      assertion: result.assertion,
+      kind: result.kind,
+      status: result.status,
+      expected: result.expected,
+      actual: result.actual,
+      confidence: result.confidence,
+      evidenceIds: result.evidenceIds,
+    }));
     if (verification.status === "failed") {
       transitionStep(item, "retryable", emit);
       incompleteItems.push(item.id);
@@ -564,6 +716,31 @@ async function runHarnessLoop(
         config.workspace.root,
         assertionTimeoutMs,
         config.workspace.maxOutputBytes,
+        ({ rubric, evidence }) =>
+          state.modelCalls >= config.loop.maxModelCalls
+            ? Promise.reject(new Error("model call budget exhausted"))
+            : judgeWithModel(
+                config.verifier,
+                { rubric, evidence },
+                {
+                  signal,
+                  onModelTrace,
+                  onParseFailure: (failure) =>
+                    persistParseFailure(state, emit, failure),
+                },
+              ),
+      );
+      assertionResults.push(
+        ...regression.assertions.map((result) => ({
+          stepId: previous.id,
+          assertion: result.assertion,
+          kind: result.kind,
+          status: result.status,
+          expected: result.expected,
+          actual: result.actual,
+          confidence: result.confidence,
+          evidenceIds: result.evidenceIds,
+        })),
       );
       if (regression.status === "failed") {
         transitionStep(previous, "retryable", emit);
@@ -580,6 +757,7 @@ async function runHarnessLoop(
       nextInstruction: missingEvidence.length
         ? `Address the following: ${missingEvidence.join("; ")}`
         : "",
+      assertionResults,
     };
     state.verifierReport = report;
     await appendVerifierReport(state, report);
@@ -587,7 +765,7 @@ async function runHarnessLoop(
 
     const budgetStop = controller.recordAttempt({
       stepId: item.id,
-      modelCalls: result.modelCalls,
+      modelCalls: 0,
       toolCalls: result.toolCalls.filter((call) => call.name !== "finish")
         .length,
       failures: missingEvidence,

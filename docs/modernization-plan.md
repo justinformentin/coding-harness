@@ -26,7 +26,7 @@ future work.
 - [x] Phase 1 — contracts and configuration.
 - [x] Phase 2 — run store and trace protocol.
 - [x] Phase 3 — deterministic step loop.
-- [ ] Phase 4 — model and context reliability.
+- [x] Phase 4 — model and context reliability.
 - [ ] Phase 5 — evaluation and extension seams.
 
 ## 1. Goal and constraints
